@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
+	"net/http/httputil"
 	"os"
 	"strings"
 	"time"
@@ -25,8 +25,12 @@ import (
 type Proxy struct {
 	config   config.Config
 	opa      *opa.Engine
-	client   *http.Client
+	rproxy   *httputil.ReverseProxy
 	listener net.Listener
+
+	// dockerClient is used for internal API calls to Docker (e.g. isolation checks).
+	// It shares the same transport as rproxy.
+	dockerClient *http.Client
 
 	// Isolation is an optional isolation context. When non-nil, created
 	// resources are labelled, list operations are filtered, and access to
@@ -37,27 +41,101 @@ type Proxy struct {
 
 // New creates a new Proxy.  iso may be nil when isolation is not desired.
 func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*Proxy, error) {
-	p := &Proxy{
-		config:    cfg,
-		opa:       opaEngine,
-		Isolation: iso,
-		client: &http.Client{
-			Timeout: 0, // no timeout for streaming operations (attach, logs, etc.)
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return net.Dial("unix", cfg.DockerSocket)
-				},
-				MaxIdleConns:        100,
-				IdleConnTimeout:     90 * time.Second,
-				DisableCompression:  true,
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse // don't follow redirects
-			},
+	// Shared transport that dials the Docker Unix socket.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.Dial("unix", cfg.DockerSocket)
+		},
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+	}
+
+	// Create client for internal Docker API calls (isolation checks).
+	dockerClient := &http.Client{
+		Timeout:   0,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
 	}
 
-	return p, nil
+	// Closure helper for logging — avoids capturing an uninitialized p.
+	logAllowed := cfg.Logging.LogAllowed
+
+	rproxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			// The URL must have a valid scheme + host for the ReverseProxy to
+			// work correctly.  The actual dial is done by the transport above,
+			// so the host is ignored.
+			req.URL.Scheme = "http"
+			req.URL.Host = "docker"
+			// Path and RawQuery are preserved from the original request.
+		},
+		Transport: transport,
+		ModifyResponse: func(resp *http.Response) error {
+			// Log the response (NOT called for 101 upgrade responses).
+			if logAllowed {
+				clientIP, _ := resp.Request.Context().Value(clientIPKey).(string)
+				if clientIP == "" {
+					clientIP = "@"
+				}
+				logPath := resp.Request.URL.RequestURI()
+				if logPath == "" {
+					logPath = resp.Request.URL.Path
+				}
+				logger.LogRequest(true, clientIP, resp.Request.Method, logPath, resp.StatusCode, resp.Request.UserAgent())
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			slog.Error("reverse proxy error", "error", err, "method", r.Method, "path", r.URL.Path)
+			http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		},
+	}
+
+	return &Proxy{
+		config:       cfg,
+		opa:          opaEngine,
+		Isolation:    iso,
+		rproxy:       rproxy,
+		dockerClient: dockerClient,
+	}, nil
+}
+
+// context key for storing the client IP in the request context.
+type contextKey string
+
+const clientIPKey contextKey = "client_ip"
+
+// conn wraps a net.Conn and logs when it is opened / closed.
+type loggingConn struct {
+	net.Conn
+	id uint64
+}
+
+var connCounter uint64
+
+func (c *loggingConn) Close() error {
+	slog.Debug("connection closed", "conn_id", c.id)
+	return c.Conn.Close()
+}
+
+// loggingListener wraps a net.Listener and wraps every accepted connection
+// with a loggingConn.
+type loggingListener struct {
+	net.Listener
+}
+
+func (l *loggingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return conn, err
+	}
+	connCounter++
+	id := connCounter
+	slog.Debug("connection accepted", "conn_id", id, "local", conn.LocalAddr(), "remote", conn.RemoteAddr())
+	return &loggingConn{Conn: conn, id: id}, nil
 }
 
 // Start begins listening and serving.
@@ -69,7 +147,6 @@ func (p *Proxy) Start() error {
 
 	switch {
 	case socket != "":
-		// Remove existing socket file, if any.
 		if err := removeSocket(socket); err != nil {
 			return fmt.Errorf("remove old socket %s: %w", socket, err)
 		}
@@ -77,7 +154,6 @@ func (p *Proxy) Start() error {
 		if err != nil {
 			return fmt.Errorf("listen on unix socket %s: %w", socket, err)
 		}
-		// Make the socket accessible.
 		if err := os.Chmod(socket, 0666); err != nil {
 			l.Close()
 			return fmt.Errorf("set socket permissions %s: %w", socket, err)
@@ -92,7 +168,7 @@ func (p *Proxy) Start() error {
 		slog.Info("listening on tcp", "address", addr)
 	}
 
-	p.listener = l
+	p.listener = &loggingListener{Listener: l}
 
 	srv := &http.Server{
 		Handler:      p,
@@ -100,7 +176,7 @@ func (p *Proxy) Start() error {
 		WriteTimeout: 0,
 	}
 
-	return srv.Serve(l)
+	return srv.Serve(p.listener)
 }
 
 // Stop gracefully closes the listener.
@@ -118,13 +194,6 @@ func (p *Proxy) logAndDeny(w http.ResponseWriter, clientIP, method, logPath stri
 	http.Error(w, body, status)
 }
 
-// logAllowed logs an allowed request.
-func (p *Proxy) logAllowed(clientIP, method, logPath string, status int, userAgent string) {
-	if p.config.Logging.LogAllowed {
-		logger.LogRequest(true, clientIP, method, logPath, status, userAgent)
-	}
-}
-
 // ServeHTTP implements http.Handler. It intercepts each request, evaluates the
 // OPA policy, and either forwards to Docker or returns 403.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +203,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		logPath = r.URL.Path
 	}
 
+	slog.Debug("=== ServeHTTP begin ===", "method", r.Method, "path", r.URL.Path, "rawquery", r.URL.RawQuery, "proto", r.Proto)
+
 	// ---- 1. Read body ----
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
@@ -142,11 +213,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot read request body", http.StatusInternalServerError)
 		return
 	}
-	// Replace the body so upstream can read it.
+	// Replace the body so the ReverseProxy can read it.
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	slog.Debug("request body read", "method", r.Method, "path", r.URL.Path, "body_size", len(bodyBytes))
 
 	// ---- 2. Determine client IP ----
 	clientIP := extractClientIP(r)
+	// Store in context so ModifyResponse can access it.
+	ctx = context.WithValue(ctx, clientIPKey, clientIP)
+	*r = *r.WithContext(ctx)
 
 	// ---- 3. Build OPA input ----
 	input := buildOPAInput(r, bodyBytes, clientIP)
@@ -158,7 +233,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), "invalid JSON in request body")
 			return
 		}
-		// Parse the JSON so it's available as input.body
 		var parsed interface{}
 		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), fmt.Sprintf("cannot parse request body as JSON: %v", err))
@@ -170,11 +244,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ---- 5. Evaluate OPA policy ----
 	result, err := p.opa.Evaluate(ctx, input)
 	if err != nil {
-		// System error — deny the request.
 		slog.Error("opa evaluation error", "error", err, "client_ip", clientIP, "method", r.Method, "path", r.URL.Path)
 		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusInternalServerError, r.UserAgent(), fmt.Sprintf("policy evaluation error: %v", err))
 		return
 	}
+
+	slog.Debug("OPA decision", "method", r.Method, "path", r.URL.Path, "allowed", result.Allowed, "reason", result.Reason)
 
 	if !result.Allowed {
 		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), result.Reason)
@@ -183,71 +258,44 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 5b. Optional isolation mediation ----
 	if p.Isolation != nil {
-		// Transform request: inject labels on creation, filters on list,
-		// labels on build, filters on prune.
 		p.Isolation.TransformRequest(r)
-
-		// Verify that the target resource (if any) belongs to this
-		// isolation context.  This makes an extra API call to Docker.
-		if err := p.Isolation.CheckAccess(ctx, p.client, r.URL.Path); err != nil {
+		if err := p.Isolation.CheckAccess(ctx, p.dockerClient, r.URL.Path); err != nil {
 			slog.Warn("isolation check failed", "error", err, "path", r.URL.Path)
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), err.Error())
 			return
 		}
 	}
 
-	// ---- 6. Forward to Docker daemon ----
-	upstreamURL := &url.URL{
-		Scheme:   "http",
-		Host:     "docker",
-		Path:     r.URL.Path,
-		RawQuery: r.URL.RawQuery,
-	}
-
-	upReq, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL.String(), r.Body)
-	if err != nil {
-		slog.Error("create upstream request", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Copy headers.
-	upReq.Header = r.Header.Clone()
-
-	// Execute upstream.
-	resp, err := p.client.Do(upReq)
-	if err != nil {
-		slog.Error("upstream request failed", "error", err, "method", r.Method, "path", r.URL.Path)
-		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Copy response headers.
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
+	// ---- 6. For upgrade requests (attach, exec), log before forwarding ----
+	// The ReverseProxy handles upgrades natively (hijack + bridge) but its
+	// ModifyResponse callback is NOT invoked for 101 responses. We log here.
+	isUpgrade := isUpgradeRequest(r)
+	if isUpgrade {
+		slog.Debug("forwarding upgrade request via ReverseProxy", "method", r.Method, "path", r.URL.Path)
+		// Log the request now; we expect 101 Switching Protocols.
+		if p.config.Logging.LogAllowed {
+			logger.LogRequest(true, clientIP, r.Method, logPath, 101, r.UserAgent())
 		}
 	}
 
-	// Write status code.
-	w.WriteHeader(resp.StatusCode)
+	// ---- 7. Forward using ReverseProxy ----
+	// Go's httputil.ReverseProxy handles everything:
+	//   - Normal requests: forwards, copies response headers/body
+	//   - Upgrade requests (101): hijacks both connections, bridges them
+	//   - Hop-by-hop header removal
+	//   - Content-Length handling
+	//   - Chunked transfer encoding
+	p.rproxy.ServeHTTP(w, r)
 
-	// Stream the body.
-	io.Copy(w, resp.Body)
-
-	// ---- 7. Log the request ----
-	p.logAllowed(clientIP, r.Method, logPath, resp.StatusCode, r.UserAgent())
+	slog.Debug("=== ServeHTTP end ===", "method", r.Method, "path", r.URL.Path)
 }
 
 // buildOPAInput constructs the input map for OPA evaluation.
-// body is kept as raw bytes initially; if it's valid JSON it will be
-// unmarshalled later in the flow.
 func buildOPAInput(r *http.Request, bodyBytes []byte, clientIP string) map[string]interface{} {
 	input := map[string]interface{}{
 		"method":    r.Method,
 		"path":      r.URL.Path,
-		"body":      string(bodyBytes), // will be replaced with parsed JSON if applicable
+		"body":      string(bodyBytes),
 		"headers":   flattenHeaders(r.Header),
 		"client_ip": clientIP,
 	}
@@ -267,21 +315,25 @@ func flattenHeaders(h http.Header) map[string]string {
 
 // extractClientIP attempts to extract the real client IP.
 func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For first.
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		parts := strings.SplitN(fwd, ",", 2)
 		return strings.TrimSpace(parts[0])
 	}
-	// Then X-Real-Ip.
 	if real := r.Header.Get("X-Real-Ip"); real != "" {
 		return real
 	}
-	// Fall back to the remote address (strip port).
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// isUpgradeRequest checks if the Docker client is requesting an HTTP upgrade
+// (used by attach, exec, etc.).
+func isUpgradeRequest(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Connection"), "Upgrade") &&
+		strings.EqualFold(r.Header.Get("Upgrade"), "tcp")
 }
 
 // removeSocket removes a Unix socket file if it exists.
