@@ -1,0 +1,28 @@
+# opa-docker-proxy configuration
+# Default path: /etc/opa-docker-proxy/config.yaml
+
+listen:
+  # Option A: Unix domain socket (default)
+  socket: /var/run/opa-docker-proxy.sock
+
+  # Option B: TCP address (uncomment to use instead)
+  # address: "127.0.0.1:2375"
+
+# Docker daemon socket path. Defaults to /var/run/docker.sock or $DOCKER_SOCKET.
+docker_socket: /var/run/docker.sock
+
+# Directory containing .rego policy files.
+rules_path: /etc/opa-docker-proxy/rules
+
+logging:
+  # Log level: debug, info, warn, error
+  level: info
+
+  # Output format: text or json
+  format: text
+
+  # Whether to log requests that were allowed
+  log_allowed: true
+
+  # Whether to log requests that were denied
+  log_denied: true
