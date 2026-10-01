@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/k3a/opa-docker-proxy/config"
+	"github.com/k3a/opa-docker-proxy/isolation"
 	"github.com/k3a/opa-docker-proxy/logger"
 	"github.com/k3a/opa-docker-proxy/opa"
 )
@@ -26,13 +27,20 @@ type Proxy struct {
 	opa      *opa.Engine
 	client   *http.Client
 	listener net.Listener
+
+	// Isolation is an optional isolation context. When non-nil, created
+	// resources are labelled, list operations are filtered, and access to
+	// individual resources is checked. This field is nil when isolation is
+	// not enabled, making all the mediation in ServeHTTP a no-op.
+	Isolation *isolation.Isolation
 }
 
-// New creates a new Proxy.
-func New(cfg config.Config, opaEngine *opa.Engine) (*Proxy, error) {
+// New creates a new Proxy.  iso may be nil when isolation is not desired.
+func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*Proxy, error) {
 	p := &Proxy{
-		config: cfg,
-		opa:    opaEngine,
+		config:    cfg,
+		opa:       opaEngine,
+		Isolation: iso,
 		client: &http.Client{
 			Timeout: 0, // no timeout for streaming operations (attach, logs, etc.)
 			Transport: &http.Transport{
@@ -171,6 +179,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !result.Allowed {
 		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), result.Reason)
 		return
+	}
+
+	// ---- 5b. Optional isolation mediation ----
+	if p.Isolation != nil {
+		// Transform request: inject labels on creation, filters on list,
+		// labels on build, filters on prune.
+		p.Isolation.TransformRequest(r)
+
+		// Verify that the target resource (if any) belongs to this
+		// isolation context.  This makes an extra API call to Docker.
+		if err := p.Isolation.CheckAccess(ctx, p.client, r.URL.Path); err != nil {
+			slog.Warn("isolation check failed", "error", err, "path", r.URL.Path)
+			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), err.Error())
+			return
+		}
 	}
 
 	// ---- 6. Forward to Docker daemon ----
