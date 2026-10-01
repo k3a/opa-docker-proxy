@@ -1,14 +1,13 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
+	"github.com/alexflint/go-arg"
 	"github.com/k3a/opa-docker-proxy/config"
 	"github.com/k3a/opa-docker-proxy/isolation"
 	"github.com/k3a/opa-docker-proxy/logger"
@@ -16,30 +15,26 @@ import (
 	"github.com/k3a/opa-docker-proxy/proxy"
 )
 
-func main() {
-	// Parse -i flag manually because it has an *optional* value.
-	//   -i           -> isolation on, name derived from CWD hash
-	//   -i myname    -> isolation on, custom name
-	isolationOn := false
-	isolationName := ""
-	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == "-i" {
-			isolationOn = true
-			// Peek at next arg; if it doesn't start with "-" treat it as the name.
-			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
-				isolationName = os.Args[i+1]
-				// Remove the name from args so flag.Parse doesn't choke.
-				os.Args = append(os.Args[:i+1], os.Args[i+2:]...)
-			}
-			break
-		}
-	}
+// cliArgs describes the command-line interface.
+type cliArgs struct {
+	Config        string `arg:"-c" default:"/etc/opa-docker-proxy/config.yaml" help:"path to configuration file"`
+	Isolation     bool   `arg:"-i" help:"enable isolation (name defaults to CWD hash; use --isolation-name to override)"`
+	IsolationName string `arg:"--isolation-name" help:"isolation name (implies -i)"`
+}
 
-	configPath := flag.String("c", "/etc/opa-docker-proxy/config.yaml", "path to configuration file")
-	flag.Parse()
+func (cliArgs) Description() string {
+	return "OPA-powered Docker access proxy with optional resource isolation."
+}
+
+func main() {
+	var args cliArgs
+	arg.MustParse(&args)
+
+	// --isolation-name implies -i.
+	isolationOn := args.Isolation || args.IsolationName != ""
 
 	// Load configuration.
-	cfg, err := config.LoadConfig(*configPath)
+	cfg, err := config.LoadConfig(args.Config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
 		os.Exit(1)
@@ -47,7 +42,7 @@ func main() {
 
 	// Initialise structured logging.
 	logger.Setup(cfg.Logging.Level, cfg.Logging.Format, os.Stdout)
-	slog.Info("starting opa-docker-proxy", "config_file", *configPath)
+	slog.Info("starting opa-docker-proxy", "config_file", args.Config)
 
 	// Load OPA policies.
 	opaEngine, err := opa.NewEngine(cfg.PoliciesPath)
@@ -60,7 +55,7 @@ func main() {
 	// Optional isolation context.
 	var iso *isolation.Isolation
 	if isolationOn {
-		iso, err = isolation.New(isolationName)
+		iso, err = isolation.New(args.IsolationName)
 		if err != nil {
 			slog.Error("failed to create isolation context", "error", err)
 			os.Exit(1)

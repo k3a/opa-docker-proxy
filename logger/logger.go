@@ -23,6 +23,7 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 	if r.Message == "request" {
 		var clientIP, method, path, userAgent string
 		var status int
+		var connID uint64
 		r.Attrs(func(a slog.Attr) bool {
 			switch a.Key {
 			case "client_ip":
@@ -35,10 +36,16 @@ func (h *textHandler) Handle(_ context.Context, r slog.Record) error {
 				status = int(a.Value.Int64())
 			case "user_agent":
 				userAgent = a.Value.String()
+			case "conn_id":
+				connID = a.Value.Uint64()
 			}
 			return true
 		})
-		line := fmt.Sprintf("%s %s %s - %d - %q\n", clientIP, method, path, status, userAgent)
+		prefix := ""
+		if connID > 0 {
+			prefix = fmt.Sprintf("[%d] ", connID)
+		}
+		line := fmt.Sprintf("%s%s %s %s - %d - %q\n", prefix, clientIP, method, path, status, userAgent)
 		_, err := h.out.Write([]byte(line))
 		return err
 	}
@@ -84,8 +91,9 @@ func Setup(level, format string, w io.Writer) {
 }
 
 // LogRequest logs a proxied request.
+// connID is shown as a [N] prefix in the compact log format; pass 0 to omit.
 // The actual decision of whether to log is handled by the caller (proxy).
-func LogRequest(allowed bool, clientIP, method, path string, status int, userAgent string) {
+func LogRequest(allowed bool, clientIP, method, path string, status int, userAgent string, connID uint64) {
 	level := slog.LevelInfo
 	if !allowed {
 		level = slog.LevelWarn
@@ -97,5 +105,6 @@ func LogRequest(allowed bool, clientIP, method, path string, status int, userAge
 		slog.Int("status", status),
 		slog.String("user_agent", userAgent),
 		slog.Bool("allowed", allowed),
+		slog.Uint64("conn_id", connID),
 	)
 }

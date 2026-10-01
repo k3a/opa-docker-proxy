@@ -3,12 +3,14 @@ module github.com/k3a/opa-docker-proxy
 go 1.27.1
 
 require (
+	github.com/alexflint/go-arg v1.6.1
 	github.com/open-policy-agent/opa v1.21.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/agnivade/levenshtein v1.2.1 // indirect
+	github.com/alexflint/go-scalar v1.2.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/gobwas/glob v1.0.0 // indirect

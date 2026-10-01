@@ -80,11 +80,12 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 				if clientIP == "" {
 					clientIP = "@"
 				}
+				connID, _ := resp.Request.Context().Value(connIDKey).(uint64)
 				logPath := resp.Request.URL.RequestURI()
 				if logPath == "" {
 					logPath = resp.Request.URL.Path
 				}
-				logger.LogRequest(true, clientIP, resp.Request.Method, logPath, resp.StatusCode, resp.Request.UserAgent())
+				logger.LogRequest(true, clientIP, resp.Request.Method, logPath, resp.StatusCode, resp.Request.UserAgent(), connID)
 			}
 			return nil
 		},
@@ -103,10 +104,13 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 	}, nil
 }
 
-// context key for storing the client IP in the request context.
+// context keys for storing per-request metadata.
 type contextKey string
 
-const clientIPKey contextKey = "client_ip"
+const (
+	clientIPKey contextKey = "client_ip"
+	connIDKey   contextKey = "conn_id"
+)
 
 // conn wraps a net.Conn and logs when it is opened / closed.
 type loggingConn struct {
@@ -174,6 +178,14 @@ func (p *Proxy) Start() error {
 		Handler:      p,
 		ReadTimeout:  0,
 		WriteTimeout: 0,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			// Propagate the connection ID (from loggingConn) into the request
+			// context so it can be included in request logs.
+			if lc, ok := c.(*loggingConn); ok {
+				ctx = context.WithValue(ctx, connIDKey, lc.id)
+			}
+			return ctx
+		},
 	}
 
 	return srv.Serve(p.listener)
@@ -187,9 +199,9 @@ func (p *Proxy) Stop() {
 }
 
 // logAndDeny logs a denied request and sends an HTTP error response.
-func (p *Proxy) logAndDeny(w http.ResponseWriter, clientIP, method, logPath string, status int, userAgent, body string) {
+func (p *Proxy) logAndDeny(w http.ResponseWriter, clientIP, method, logPath string, status int, userAgent, body string, connID uint64) {
 	if p.config.Logging.LogDenied {
-		logger.LogRequest(false, clientIP, method, logPath, status, userAgent)
+		logger.LogRequest(false, clientIP, method, logPath, status, userAgent, connID)
 	}
 	http.Error(w, body, status)
 }
@@ -203,7 +215,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		logPath = r.URL.Path
 	}
 
-	slog.Debug("=== ServeHTTP begin ===", "method", r.Method, "path", r.URL.Path, "rawquery", r.URL.RawQuery, "proto", r.Proto)
+	// Extract connection ID from context (set by ConnContext in Start).
+	connID, _ := ctx.Value(connIDKey).(uint64)
+
+	slog.Debug("=== ServeHTTP begin ===", "method", r.Method, "path", r.URL.Path, "rawquery", r.URL.RawQuery, "proto", r.Proto, "conn_id", connID)
 
 	// ---- 1. Read body ----
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -215,7 +230,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Replace the body so the ReverseProxy can read it.
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	slog.Debug("request body read", "method", r.Method, "path", r.URL.Path, "body_size", len(bodyBytes))
+	slog.Debug("request body read", "method", r.Method, "path", r.URL.Path, "body_size", len(bodyBytes), "conn_id", connID)
 
 	// ---- 2. Determine client IP ----
 	clientIP := extractClientIP(r)
@@ -230,12 +245,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
 	if len(bodyBytes) > 0 && strings.HasPrefix(ct, "application/json") {
 		if !json.Valid(bodyBytes) {
-			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), "invalid JSON in request body")
+			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), "invalid JSON in request body", connID)
 			return
 		}
 		var parsed interface{}
 		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
-			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), fmt.Sprintf("cannot parse request body as JSON: %v", err))
+			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), fmt.Sprintf("cannot parse request body as JSON: %v", err), connID)
 			return
 		}
 		input["body"] = parsed
@@ -245,14 +260,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	result, err := p.opa.Evaluate(ctx, input)
 	if err != nil {
 		slog.Error("opa evaluation error", "error", err, "client_ip", clientIP, "method", r.Method, "path", r.URL.Path)
-		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusInternalServerError, r.UserAgent(), fmt.Sprintf("policy evaluation error: %v", err))
+		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusInternalServerError, r.UserAgent(), fmt.Sprintf("policy evaluation error: %v", err), connID)
 		return
 	}
 
-	slog.Debug("OPA decision", "method", r.Method, "path", r.URL.Path, "allowed", result.Allowed, "reason", result.Reason)
+	slog.Debug("OPA decision", "method", r.Method, "path", r.URL.Path, "allowed", result.Allowed, "reason", result.Reason, "conn_id", connID)
 
 	if !result.Allowed {
-		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), result.Reason)
+		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), result.Reason, connID)
 		return
 	}
 
@@ -261,7 +276,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.Isolation.TransformRequest(r)
 		if err := p.Isolation.CheckAccess(ctx, p.dockerClient, r.URL.Path); err != nil {
 			slog.Warn("isolation check failed", "error", err, "path", r.URL.Path)
-			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), err.Error())
+			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), err.Error(), connID)
 			return
 		}
 	}
@@ -271,10 +286,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ModifyResponse callback is NOT invoked for 101 responses. We log here.
 	isUpgrade := isUpgradeRequest(r)
 	if isUpgrade {
-		slog.Debug("forwarding upgrade request via ReverseProxy", "method", r.Method, "path", r.URL.Path)
+		slog.Debug("forwarding upgrade request via ReverseProxy", "method", r.Method, "path", r.URL.Path, "conn_id", connID)
 		// Log the request now; we expect 101 Switching Protocols.
 		if p.config.Logging.LogAllowed {
-			logger.LogRequest(true, clientIP, r.Method, logPath, 101, r.UserAgent())
+			logger.LogRequest(true, clientIP, r.Method, logPath, 101, r.UserAgent(), connID)
 		}
 	}
 
@@ -287,7 +302,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//   - Chunked transfer encoding
 	p.rproxy.ServeHTTP(w, r)
 
-	slog.Debug("=== ServeHTTP end ===", "method", r.Method, "path", r.URL.Path)
+	slog.Debug("=== ServeHTTP end ===", "method", r.Method, "path", r.URL.Path, "conn_id", connID)
 }
 
 // buildOPAInput constructs the input map for OPA evaluation.
