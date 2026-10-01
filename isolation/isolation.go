@@ -241,7 +241,12 @@ func (i *Isolation) TransformRequest(r *http.Request) {
 		if err != nil {
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(i.injectBodyLabels(body)))
+		modified := i.injectBodyLabels(body)
+		r.Body = io.NopCloser(bytes.NewReader(modified))
+		// Update Content-Length to match the new body size so the
+		// reverse proxy doesn't forward a stale length to Docker.
+		r.ContentLength = int64(len(modified))
+		r.Header.Set("Content-Length", fmt.Sprint(len(modified)))
 
 	case isBuildPath(path):
 		i.injectBuildLabels(r.URL)
