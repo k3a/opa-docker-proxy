@@ -22,6 +22,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/k3a/opa-docker-proxy/utils"
 )
 
 // LabelKey is the Docker label key injected on every isolated resource.
@@ -83,23 +85,6 @@ func (i *Isolation) labelFilterEntry() map[string]interface{} {
 	return map[string]interface{}{LabelKey + "=" + i.Name: true}
 }
 
-// ---------------------------------------------------------------------------
-// URL path helpers – determine what kind of Docker API endpoint we are
-// hitting.
-// ---------------------------------------------------------------------------
-
-// stripVersionPrefix strips an optional /v1.xx prefix from a Docker API path.
-func stripVersionPrefix(path string) string {
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
-	if len(parts) < 2 {
-		return path
-	}
-	if len(parts[0]) > 0 && parts[0][0] == 'v' {
-		return "/" + parts[1]
-	}
-	return path
-}
-
 // pathHasID reports whether the path refers to a specific resource instance
 // (e.g. /containers/{id}/stop) as opposed to a collection
 // (e.g. /containers/json).
@@ -120,7 +105,7 @@ func pathHasID(cleaned string) bool {
 // resourceTypeAndID extracts the resource type and ID from a Docker API path.
 // Returns (type, id, true) on success, or (_, _, false) for list/create paths.
 func resourceTypeAndID(path string) (ResourceType, string, bool) {
-	cleaned := stripVersionPrefix(path)
+	cleaned := utils.StripVersionPrefix(path)
 	if cleaned == "" || cleaned == "/" {
 		return 0, "", false
 	}
@@ -162,7 +147,7 @@ func resourceTypeAndID(path string) (ResourceType, string, bool) {
 // isCollectionListPath returns true when the path is a collection-list
 // endpoint that supports the "filters" query parameter.
 func isCollectionListPath(path string) bool {
-	cleaned := stripVersionPrefix(path)
+	cleaned := utils.StripVersionPrefix(path)
 	// Exact match for list endpoints
 	listEndpoints := map[string]bool{
 		"/containers/json": true,
@@ -184,7 +169,7 @@ func isCollectionListPath(path string) bool {
 
 // isCreatePath returns true when the path is a resource-creation endpoint.
 func isCreatePath(path string) bool {
-	cleaned := stripVersionPrefix(path)
+	cleaned := utils.StripVersionPrefix(path)
 	createEndpoints := map[string]bool{
 		"/containers/create": true,
 		"/volumes/create":    true,
@@ -195,13 +180,13 @@ func isCreatePath(path string) bool {
 
 // isBuildPath returns true when the path is the Docker build endpoint.
 func isBuildPath(path string) bool {
-	cleaned := stripVersionPrefix(path)
+	cleaned := utils.StripVersionPrefix(path)
 	return cleaned == "/build"
 }
 
 // isPrunePath returns true when the path is a prune endpoint.
 func isPrunePath(path string) bool {
-	cleaned := stripVersionPrefix(path)
+	cleaned := utils.StripVersionPrefix(path)
 	pruneEndpoints := map[string]bool{
 		"/containers/prune": true,
 		"/images/prune":     true,

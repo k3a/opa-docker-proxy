@@ -18,6 +18,7 @@ import (
 	"github.com/k3a/opa-docker-proxy/isolation"
 	"github.com/k3a/opa-docker-proxy/logger"
 	"github.com/k3a/opa-docker-proxy/opa"
+	"github.com/k3a/opa-docker-proxy/utils"
 )
 
 // Proxy is an HTTP reverse proxy that evaluates OPA policies before forwarding
@@ -46,9 +47,9 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial("unix", cfg.DockerSocket)
 		},
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
+		MaxIdleConns:       100,
+		IdleConnTimeout:    90 * time.Second,
+		DisableCompression: true,
 	}
 
 	// Create client for internal Docker API calls (isolation checks).
@@ -306,10 +307,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildOPAInput constructs the input map for OPA evaluation.
+// The Docker API version prefix (e.g. /v1.44) is stripped from the path
+// so that policies can match against clean paths like /containers/create.
 func buildOPAInput(r *http.Request, bodyBytes []byte, clientIP string) map[string]interface{} {
+	api_ver, path := utils.SplitVersionPath(r.URL.Path)
 	input := map[string]interface{}{
 		"method":    r.Method,
-		"path":      r.URL.Path,
+		"api_ver":   api_ver,
+		"path":      path,
 		"body":      string(bodyBytes),
 		"headers":   flattenHeaders(r.Header),
 		"client_ip": clientIP,
