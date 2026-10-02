@@ -39,13 +39,14 @@ func NewEngine(polDir string) (*Engine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read rego file %s: %w", path, err)
 		}
+
 		modules[path] = string(data)
 	}
 
 	// Compile the modules.
 	compiler, err := ast.CompileModulesWithOpt(modules, ast.CompileOpts{
-                EnablePrintStatements: true,
-        })
+		EnablePrintStatements: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("compile rego modules: %w", err)
 	}
@@ -79,7 +80,7 @@ type EvalResult struct {
 // The input map must contain the keys: method, path, body, headers, client_ip.
 // If a system error occurs (compilation, evaluation) an error is returned and
 // the request should be denied.
-func (e *Engine) Evaluate(ctx context.Context, input map[string]interface{}) (*EvalResult, error) {
+func (e *Engine) Evaluate(ctx context.Context, input map[string]any) (*EvalResult, error) {
 	results, err := e.prepared.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
 		return nil, fmt.Errorf("opa eval: %w", err)
@@ -92,6 +93,7 @@ func (e *Engine) Evaluate(ctx context.Context, input map[string]interface{}) (*E
 
 	// The last result's bindings carry the variable values.
 	result := results[len(results)-1]
+
 	allowVal, ok := result.Bindings["result"]
 	if !ok {
 		return &EvalResult{Allowed: false, Reason: "policy did not return a result"}, nil
@@ -104,6 +106,7 @@ func (e *Engine) Evaluate(ctx context.Context, input map[string]interface{}) (*E
 
 	// Extract reason from bindings (always available thanks to default rule).
 	reason := "denied by policy"
+
 	if reasonRaw, ok := result.Bindings["reason"]; ok {
 		if s, ok := reasonRaw.(string); ok {
 			reason = s
@@ -123,15 +126,19 @@ func findRegoFiles(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var files []string
+
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
+
 		if strings.HasSuffix(e.Name(), ".rego") {
 			files = append(files, filepath.Join(dir, e.Name()))
 		}
 	}
+
 	return files, nil
 }
 
@@ -142,11 +149,12 @@ type slogPrintHook struct{}
 
 func (h *slogPrintHook) Print(_ print.Context, msg string) error {
 	slog.Debug("opa print", "output", msg)
+
 	return nil
 }
 
-// boolVal extracts a boolean from an arbitrary interface{} value.
-func boolVal(v interface{}) (bool, error) {
+// boolVal extracts a boolean from an arbitrary any value.
+func boolVal(v any) (bool, error) {
 	switch b := v.(type) {
 	case bool:
 		return b, nil

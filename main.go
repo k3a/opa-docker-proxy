@@ -17,8 +17,8 @@ import (
 
 // cliArgs describes the command-line interface.
 type cliArgs struct {
-	Config        string `arg:"-c" default:"/etc/opa-docker-proxy/config.yaml" help:"path to configuration file"`
-	Isolation     bool   `arg:"-i" help:"enable isolation (name defaults to CWD hash; use --isolation-name to override)"`
+	Config        string `arg:"-c"               default:"/etc/opa-docker-proxy/config.yaml"                                           help:"path to configuration file"`
+	Isolation     bool   `arg:"-i"               help:"enable isolation (name defaults to CWD hash; use --isolation-name to override)"`
 	IsolationName string `arg:"--isolation-name" help:"isolation name (implies -i)"`
 }
 
@@ -50,6 +50,7 @@ func main() {
 		slog.Error("failed to load OPA policies", "error", err)
 		os.Exit(1)
 	}
+
 	slog.Info("OPA policies loaded", "policies_path", cfg.PoliciesPath)
 
 	// Optional isolation context.
@@ -60,6 +61,7 @@ func main() {
 			slog.Error("failed to create isolation context", "error", err)
 			os.Exit(1)
 		}
+
 		slog.Info("isolation enabled", "name", iso.Name)
 	}
 

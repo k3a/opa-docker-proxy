@@ -44,7 +44,7 @@ type Proxy struct {
 func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*Proxy, error) {
 	// Shared transport that dials the Docker Unix socket.
 	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		DialContext: func(_ctx context.Context, network, addr string) (net.Conn, error) {
 			return net.Dial("unix", cfg.DockerSocket)
 		},
 		MaxIdleConns:       100,
@@ -56,7 +56,7 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 	dockerClient := &http.Client{
 		Timeout:   0,
 		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		CheckRedirect: func(_req *http.Request, _via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
@@ -65,12 +65,12 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 	logAllowed := cfg.Logging.LogAllowed
 
 	rproxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
+		Rewrite: func(preq *httputil.ProxyRequest) {
 			// The URL must have a valid scheme + host for the ReverseProxy to
 			// work correctly.  The actual dial is done by the transport above,
 			// so the host is ignored.
-			req.URL.Scheme = "http"
-			req.URL.Host = "docker"
+			preq.Out.URL.Scheme = "http"
+			preq.Out.URL.Host = "docker"
 			// Path and RawQuery are preserved from the original request.
 		},
 		Transport: transport,
@@ -81,13 +81,17 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 				if clientIP == "" {
 					clientIP = "@"
 				}
+
 				connID, _ := resp.Request.Context().Value(connIDKey).(uint64)
+
 				logPath := resp.Request.URL.RequestURI()
 				if logPath == "" {
 					logPath = resp.Request.URL.Path
 				}
+
 				logger.LogRequest(true, clientIP, resp.Request.Method, logPath, resp.StatusCode, resp.Request.UserAgent(), connID)
 			}
+
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -123,6 +127,7 @@ var connCounter uint64
 
 func (c *loggingConn) Close() error {
 	slog.Debug("connection closed", "conn_id", c.id)
+
 	return c.Conn.Close()
 }
 
@@ -137,16 +142,21 @@ func (l *loggingListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return conn, err
 	}
+
 	connCounter++
 	id := connCounter
 	slog.Debug("connection accepted", "conn_id", id, "local", conn.LocalAddr(), "remote", conn.RemoteAddr())
+
 	return &loggingConn{Conn: conn, id: id}, nil
 }
 
 // Start begins listening and serving.
 func (p *Proxy) Start() error {
-	var l net.Listener
-	var err error
+	var (
+		l   net.Listener
+		err error
+	)
+
 	addr := p.config.Listen.Address
 	socket := p.config.Listen.Socket
 
@@ -155,14 +165,20 @@ func (p *Proxy) Start() error {
 		if err := removeSocket(socket); err != nil {
 			return fmt.Errorf("remove old socket %s: %w", socket, err)
 		}
+
 		l, err = net.Listen("unix", socket)
 		if err != nil {
 			return fmt.Errorf("listen on unix socket %s: %w", socket, err)
 		}
+
 		if err := os.Chmod(socket, 0666); err != nil {
-			l.Close()
+			if cerr := l.Close(); cerr != nil {
+				slog.Warn("failed to close listener", "error", cerr)
+			}
+
 			return fmt.Errorf("set socket permissions %s: %w", socket, err)
 		}
+
 		slog.Info("listening on unix socket", "socket", socket)
 
 	case addr != "":
@@ -170,6 +186,7 @@ func (p *Proxy) Start() error {
 		if err != nil {
 			return fmt.Errorf("listen on tcp %s: %w", addr, err)
 		}
+
 		slog.Info("listening on tcp", "address", addr)
 	}
 
@@ -185,6 +202,7 @@ func (p *Proxy) Start() error {
 			if lc, ok := c.(*loggingConn); ok {
 				ctx = context.WithValue(ctx, connIDKey, lc.id)
 			}
+
 			return ctx
 		},
 	}
@@ -195,7 +213,9 @@ func (p *Proxy) Start() error {
 // Stop gracefully closes the listener.
 func (p *Proxy) Stop() {
 	if p.listener != nil {
-		p.listener.Close()
+		if err := p.listener.Close(); err != nil {
+			slog.Warn("failed to close listener", "error", err)
+		}
 	}
 }
 
@@ -204,6 +224,7 @@ func (p *Proxy) logAndDeny(w http.ResponseWriter, clientIP, method, logPath stri
 	if p.config.Logging.LogDenied {
 		logger.LogRequest(false, clientIP, method, logPath, status, userAgent, connID)
 	}
+
 	http.Error(w, body, status)
 }
 
@@ -211,6 +232,7 @@ func (p *Proxy) logAndDeny(w http.ResponseWriter, clientIP, method, logPath stri
 // OPA policy, and either forwards to Docker or returns 403.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
 	logPath := r.URL.RequestURI()
 	if logPath == "" {
 		logPath = r.URL.Path
@@ -223,10 +245,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 1. Read body ----
 	bodyBytes, err := io.ReadAll(r.Body)
-	r.Body.Close()
+	if errc := r.Body.Close(); errc != nil {
+		slog.Warn("failed to close request body", "error", errc)
+	}
+
 	if err != nil {
 		slog.Error("read body", "error", err)
 		http.Error(w, "cannot read request body", http.StatusInternalServerError)
+
 		return
 	}
 	// Replace the body so the ReverseProxy can read it.
@@ -247,13 +273,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(bodyBytes) > 0 && strings.HasPrefix(ct, "application/json") {
 		if !json.Valid(bodyBytes) {
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), "invalid JSON in request body", connID)
+
 			return
 		}
-		var parsed interface{}
+
+		var parsed any
 		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), fmt.Sprintf("cannot parse request body as JSON: %v", err), connID)
+
 			return
 		}
+
 		input["body"] = parsed
 	}
 
@@ -262,6 +292,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("opa evaluation error", "error", err, "client_ip", clientIP, "method", r.Method, "path", r.URL.Path)
 		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusInternalServerError, r.UserAgent(), fmt.Sprintf("policy evaluation error: %v", err), connID)
+
 		return
 	}
 
@@ -269,15 +300,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !result.Allowed {
 		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), result.Reason, connID)
+
 		return
 	}
 
 	// ---- 5b. Optional isolation mediation ----
 	if p.Isolation != nil {
 		p.Isolation.TransformRequest(r)
+
 		if err := p.Isolation.CheckAccess(ctx, p.dockerClient, r.URL.Path); err != nil {
 			slog.Warn("isolation check failed", "error", err, "path", r.URL.Path)
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), err.Error(), connID)
+
 			return
 		}
 	}
@@ -309,16 +343,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // buildOPAInput constructs the input map for OPA evaluation.
 // The Docker API version prefix (e.g. /v1.44) is stripped from the path
 // so that policies can match against clean paths like /containers/create.
-func buildOPAInput(r *http.Request, bodyBytes []byte, clientIP string) map[string]interface{} {
-	api_ver, path := utils.SplitVersionPath(r.URL.Path)
-	input := map[string]interface{}{
+func buildOPAInput(r *http.Request, bodyBytes []byte, clientIP string) map[string]any {
+	apiVer, path := utils.SplitVersionPath(r.URL.Path)
+	input := map[string]any{
 		"method":    r.Method,
-		"api_ver":   api_ver,
+		"api_ver":   apiVer,
 		"path":      path,
 		"body":      string(bodyBytes),
 		"headers":   flattenHeaders(r.Header),
 		"client_ip": clientIP,
 	}
+
 	return input
 }
 
@@ -330,6 +365,7 @@ func flattenHeaders(h http.Header) map[string]string {
 			out[k] = v[0]
 		}
 	}
+
 	return out
 }
 
@@ -337,15 +373,19 @@ func flattenHeaders(h http.Header) map[string]string {
 func extractClientIP(r *http.Request) string {
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		parts := strings.SplitN(fwd, ",", 2)
+
 		return strings.TrimSpace(parts[0])
 	}
-	if real := r.Header.Get("X-Real-Ip"); real != "" {
-		return real
+
+	if realIP := r.Header.Get("X-Real-Ip"); realIP != "" {
+		return realIP
 	}
+
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
+
 	return host
 }
 
@@ -362,8 +402,10 @@ func removeSocket(path string) error {
 	if err == nil {
 		return os.Remove(path)
 	}
+
 	if os.IsNotExist(err) {
 		return nil
 	}
+
 	return err
 }
