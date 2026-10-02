@@ -22,7 +22,7 @@ type Engine struct {
 // query for both "allow" and "reason". The policy files must define a rule
 // named "allow" that evaluates to true when a request is permitted, and a
 // rule named "reason" that provides a human-readable explanation.
-func NewEngine(polDir string) (*Engine, error) {
+func NewEngine(polDir string, allowOPAPrint bool) (*Engine, error) {
 	regoFiles, err := findRegoFiles(polDir)
 	if err != nil {
 		return nil, fmt.Errorf("find rego files in %s: %w", polDir, err)
@@ -57,7 +57,7 @@ func NewEngine(polDir string) (*Engine, error) {
 	r := rego.New(
 		rego.Query("result = data.policies.allow; reason = data.policies.reason"),
 		rego.Compiler(compiler),
-		rego.PrintHook(&slogPrintHook{}),
+		rego.PrintHook(&slogPrintHook{allowOPAPrint}),
 	)
 
 	prepared, err := r.PrepareForEval(context.Background())
@@ -145,10 +145,12 @@ func findRegoFiles(dir string) ([]string, error) {
 // slogPrintHook implements print.Hook and routes OPA print() output to slog.
 // The Location field in print.Context is intentionally omitted from the log
 // call — it can be added if you want per-print-call source references.
-type slogPrintHook struct{}
+type slogPrintHook struct {
+	allowOPAPrint bool
+}
 
 func (h *slogPrintHook) Print(_ print.Context, msg string) error {
-	slog.Debug("opa print", "output", msg)
+	slog.Info("opa print", "output", msg)
 
 	return nil
 }

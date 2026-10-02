@@ -45,7 +45,7 @@ func main() {
 	slog.Info("starting opa-docker-proxy", "config_file", args.Config)
 
 	// Load OPA policies.
-	opaEngine, err := opa.NewEngine(cfg.PoliciesPath)
+	opaEngine, err := opa.NewEngine(cfg.PoliciesPath, cfg.Logging.LogOPA)
 	if err != nil {
 		slog.Error("failed to load OPA policies", "error", err)
 		os.Exit(1)

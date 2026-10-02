@@ -15,6 +15,7 @@ type LoggingConfig struct {
 	Format     string `json:"format"      yaml:"format"`
 	LogAllowed bool   `json:"log_allowed" yaml:"log_allowed"`
 	LogDenied  bool   `json:"log_denied"  yaml:"log_denied"`
+	LogOPA     bool   `json:"log_opa"  yaml:"log_opa"`
 }
 
 // ListenConfig defines where the proxy listens for incoming connections.
@@ -49,6 +50,7 @@ func DefaultConfig() Config {
 			Format:     "text",
 			LogAllowed: true,
 			LogDenied:  true,
+			LogOPA:     true,
 		},
 	}
 }
