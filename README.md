@@ -67,7 +67,7 @@ Validation: at least one of `listen.socket`/`listen.address`, non-empty `docker_
 
 ## Request flow (`proxy/proxy.go`)
 
-1. Read the body; determine client IP (`X-Forwarded-For` → `X-Real-Ip` → remote addr; Unix socket clients show up as `@`).
+1. Read the body; determine client IP (socket peer address only; `X-Forwarded-For`/`X-Real-Ip` are ignored because clients can forge them; Unix socket clients show up as `@`).
 2. Build OPA input (below). If `Content-Type` is `application/json` the body is validated and parsed (400 on invalid JSON, duplicate keys, or non-canonical key spelling, see "Request body checks"); otherwise `body` stays a raw string. The query string is passed as `query` (`{"fromImage": ["alpine"]}`).
 3. Evaluate `data.policies.allow` and `data.policies.reason`. Deny → HTTP 403 with the reason; evaluation error → 500. No result = deny.
 4. If isolation is on: transform the request and check resource ownership (403 otherwise).

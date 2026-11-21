@@ -374,18 +374,10 @@ func flattenHeaders(h http.Header) map[string]string {
 	return out
 }
 
-// extractClientIP attempts to extract the real client IP.
+// extractClientIP returns the socket peer address. Forwarding headers
+// (X-Forwarded-For, X-Real-Ip) are client-controlled and deliberately ignored,
+// since client_ip is used for access control in policies.
 func extractClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		parts := strings.SplitN(fwd, ",", 2)
-
-		return strings.TrimSpace(parts[0])
-	}
-
-	if realIP := r.Header.Get("X-Real-Ip"); realIP != "" {
-		return realIP
-	}
-
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
