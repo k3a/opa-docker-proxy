@@ -21,10 +21,15 @@ import (
 
 const (
 	buildKitService = "/moby.buildkit.v1.Control/"
+	bridgeService   = "/moby.buildkit.v1.frontend.LLBBridge/"
 
 	// MethodSolve is the gRPC method whose first request message is a
 	// SolveRequest.
 	MethodSolve = buildKitService + "Solve"
+
+	// MethodBridgeSolve is the call a client-side frontend makes to have the
+	// daemon run a frontend. Its request is a frontend.SolveRequest.
+	MethodBridgeSolve = bridgeService + "Solve"
 
 	frontendDockerfile = "dockerfile.v0"
 	frontendLabelAttr  = "label:"
@@ -39,6 +44,24 @@ var allowedBuildKitMethods = map[string]bool{
 	buildKitService + "Session":     true,
 	buildKitService + "Info":        true,
 	buildKitService + "ListWorkers": true,
+
+	// Current clients run the Dockerfile frontend themselves and call back
+	// into the daemon through the LLB bridge. Container execution
+	// (NewContainer, ExecProcess) is left out.
+	bridgeService + "Ping":               true,
+	bridgeService + "Solve":              true,
+	bridgeService + "Return":             true,
+	bridgeService + "Inputs":             true,
+	bridgeService + "Evaluate":           true,
+	bridgeService + "ReadFile":           true,
+	bridgeService + "ReadDir":            true,
+	bridgeService + "StatFile":           true,
+	bridgeService + "ResolveImageConfig": true,
+	bridgeService + "ResolveSourceMeta":  true,
+	bridgeService + "Warn":               true,
+
+	// Build tracing.
+	"/opentelemetry.proto.collector.trace.v1.TraceService/Export": true,
 }
 
 // exporterTypes lists the exporters a Solve may use. The first group writes
@@ -150,7 +173,9 @@ func (b *BuildKit) Solve(ctx context.Context, msg []byte) ([]byte, func(), error
 		out = append(out, f.raw...)
 	}
 
-	if frontend != frontendDockerfile {
+	// An empty frontend is the client-side frontend mode of current clients;
+	// the Dockerfile frontend runs in the client then.
+	if frontend != "" && frontend != frontendDockerfile {
 		return nil, nil, fmt.Errorf("access denied: BuildKit frontend %q is not allowed with isolation (only %s)", frontend, frontendDockerfile)
 	}
 
@@ -175,6 +200,52 @@ func (b *BuildKit) Solve(ctx context.Context, msg []byte) ([]byte, func(), error
 	out = protowire.AppendBytes(out, mapEntry(frontendLabelAttr+LabelKey, b.iso.Name))
 
 	return out, func() { b.verify(names) }, nil
+}
+
+// frontend.SolveRequest field numbers (frontend/gateway/pb/gateway.proto).
+const (
+	bridgeFrontend    protowire.Number = 2
+	bridgeFrontendOpt protowire.Number = 3
+)
+
+// BridgeSolve rewrites the first message of an LLBBridge Solve call so the
+// Dockerfile frontend it starts labels the image. In client-side frontend
+// mode this is where the frontend options are set, not in the Control Solve.
+// A client that does not send the label gets caught by the check after the
+// build.
+func (b *BuildKit) BridgeSolve(msg []byte) ([]byte, error) {
+	fields, err := parseWire(msg)
+	if err != nil {
+		return nil, fmt.Errorf("access denied: malformed BuildKit frontend request: %w", err)
+	}
+
+	out := make([]byte, 0, len(msg)+128)
+	hasFrontend := false
+
+	for _, f := range fields {
+		switch f.num {
+		case bridgeFrontend:
+			hasFrontend = len(f.val) > 0
+		case bridgeFrontendOpt:
+			k, _, err := parseMapEntry(f.val)
+			if err != nil {
+				return nil, fmt.Errorf("access denied: malformed BuildKit frontend options: %w", err)
+			}
+
+			if strings.EqualFold(k, frontendLabelAttr+LabelKey) {
+				continue
+			}
+		}
+
+		out = append(out, f.raw...)
+	}
+
+	if hasFrontend {
+		out = protowire.AppendTag(out, bridgeFrontendOpt, protowire.BytesType)
+		out = protowire.AppendBytes(out, mapEntry(frontendLabelAttr+LabelKey, b.iso.Name))
+	}
+
+	return out, nil
 }
 
 // exporter is a decoded Exporter message.
@@ -224,8 +295,10 @@ func (b *BuildKit) checkExporter(ctx context.Context, e exporter) ([]string, err
 }
 
 // verify untags names that do not point to an image of this context after a
-// build. The label is injected as a frontend attribute, which a custom
-// frontend named by a "# syntax=" line in the Dockerfile is free to ignore.
+// build. The label is injected as a frontend attribute, which only an honest
+// frontend applies: a client running its own frontend, or a custom one named
+// by a "# syntax=" line in the Dockerfile, is free to ignore it and to put
+// any labels in the image config.
 func (b *BuildKit) verify(names []string) {
 	ctx := context.Background()
 

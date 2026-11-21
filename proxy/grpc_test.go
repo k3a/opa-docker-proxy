@@ -28,6 +28,10 @@ func (g fakeGuard) CheckMethod(m string) error {
 	return nil
 }
 
+func (g fakeGuard) BridgeSolve(msg []byte) ([]byte, error) {
+	return append([]byte("bridged:"), msg...), nil
+}
+
 func (g fakeGuard) Solve(_ context.Context, msg []byte) ([]byte, func(), error) {
 	if string(msg) == "bad" {
 		return nil, nil, errors.New("access denied: bad solve")
@@ -144,6 +148,12 @@ func TestGRPCBridge(t *testing.T) {
 	}
 
 	<-guard.solved
+
+	// bridge solve: rewritten too
+	_, body = call(isolation.MethodBridgeSolve, []byte("req"))
+	if !bytes.Equal(body, frameGRPC([]byte("bridged:req"))) {
+		t.Errorf("bridge solve body %q", body)
+	}
 
 	resp, _ = call(isolation.MethodSolve, []byte("bad"))
 	if resp.Header.Get("Grpc-Status") != "7" {

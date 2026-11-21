@@ -33,6 +33,8 @@ type grpcGuard interface {
 	// Solve checks the first message of a Solve call. It returns the message
 	// to forward and a function to call once the call has finished.
 	Solve(ctx context.Context, msg []byte) ([]byte, func(), error)
+	// BridgeSolve rewrites the first message of an LLBBridge Solve call.
+	BridgeSolve(msg []byte) ([]byte, error)
 }
 
 var _ grpcGuard = (*isolation.BuildKit)(nil)
@@ -158,6 +160,7 @@ type grpcBridge struct {
 
 func (b *grpcBridge) serve(w http.ResponseWriter, r *http.Request) {
 	method := r.URL.Path
+	slog.Debug("grpc call", "method", method)
 
 	if err := b.guard.CheckMethod(method); err != nil {
 		slog.Warn("grpc call denied", "method", method, "error", err)
@@ -170,7 +173,7 @@ func (b *grpcBridge) serve(w http.ResponseWriter, r *http.Request) {
 
 	var done func()
 
-	if method == isolation.MethodSolve {
+	if method == isolation.MethodSolve || method == isolation.MethodBridgeSolve {
 		msg, rest, err := readGRPCMessage(r.Body)
 		if err != nil {
 			grpcFail(w, grpcDenied, "access denied: "+err.Error())
@@ -178,7 +181,12 @@ func (b *grpcBridge) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		msg, done, err = b.guard.Solve(r.Context(), msg)
+		if method == isolation.MethodSolve {
+			msg, done, err = b.guard.Solve(r.Context(), msg)
+		} else {
+			msg, err = b.guard.BridgeSolve(msg)
+		}
+
 		if err != nil {
 			slog.Warn("grpc call denied", "method", method, "error", err)
 			grpcFail(w, grpcDenied, err.Error())

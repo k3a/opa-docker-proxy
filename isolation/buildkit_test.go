@@ -126,7 +126,6 @@ func TestSolveDenied(t *testing.T) {
 		"foreign name":   dockerfileSolve("otherimg"),
 		"second name":    dockerfileSolve("brandnew,otherimg"),
 		"gateway":        {frontend: "gateway.v0", exporters: dockerfileSolve("x").exporters},
-		"no frontend":    {exporters: dockerfileSolve("x").exporters},
 		"push":           {frontend: frontendDockerfile, exporters: []exporter{{typ: "image", attrs: map[string]string{"name": "x", "push": "true"}}}},
 		"unknown export": {frontend: frontendDockerfile, exporters: []exporter{{typ: "registry"}}},
 		"syntax source": {frontend: frontendDockerfile, attrs: [][2]string{{"source", "evil/frontend"}},
@@ -163,7 +162,9 @@ func TestSolveAllowed(t *testing.T) {
 		"own name":  dockerfileSolve("myimg:v2"),
 		"new names": dockerfileSolve("a:1, b:2"),
 		"no export": {frontend: frontendDockerfile},
-		"tar out":   {frontend: frontendDockerfile, exporters: []exporter{{typ: "tar"}}},
+		// current clients run the Dockerfile frontend themselves
+		"client-side frontend": {exporters: dockerfileSolve("brandnew").exporters},
+		"tar out":              {frontend: frontendDockerfile, exporters: []exporter{{typ: "tar"}}},
 	}
 
 	for name, req := range cases {
@@ -177,13 +178,13 @@ func TestBuildKitMethods(t *testing.T) {
 	iso, _ := New(testName, ModeFull)
 	b := iso.BuildKit(newWorld().client(t))
 
-	for _, m := range []string{MethodSolve, buildKitService + "Status", buildKitService + "Session"} {
+	for _, m := range []string{MethodSolve, buildKitService + "Status", buildKitService + "Session", bridgeService + "Return"} {
 		if err := b.CheckMethod(m); err != nil {
 			t.Errorf("%s: %v", m, err)
 		}
 	}
 
-	for _, m := range []string{buildKitService + "Prune", buildKitService + "DiskUsage", buildKitService + "ListenBuildHistory", "/other.Service/Call"} {
+	for _, m := range []string{buildKitService + "Prune", buildKitService + "DiskUsage", buildKitService + "ListenBuildHistory", bridgeService + "NewContainer", "/other.Service/Call"} {
 		if b.CheckMethod(m) == nil {
 			t.Errorf("%s allowed", m)
 		}
@@ -215,5 +216,45 @@ func TestSolveVerifyUntagsUnlabelled(t *testing.T) {
 
 	if len(deleted) != 1 || deleted[0] != "/images/bad:1" {
 		t.Errorf("deleted %v", deleted)
+	}
+}
+
+func TestBridgeSolveInjectsLabel(t *testing.T) {
+	iso, _ := New(testName, ModeFull)
+	b := iso.BuildKit(newWorld().client(t))
+
+	var msg []byte
+
+	msg = protowire.AppendString(protowire.AppendTag(msg, bridgeFrontend, protowire.BytesType), frontendDockerfile)
+	msg = protowire.AppendBytes(protowire.AppendTag(msg, bridgeFrontendOpt, protowire.BytesType), mapEntry("filename", "Dockerfile"))
+	msg = protowire.AppendBytes(protowire.AppendTag(msg, bridgeFrontendOpt, protowire.BytesType), mapEntry(frontendLabelAttr+LabelKey, "victim"))
+
+	out, err := b.BridgeSolve(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fields, _ := parseWire(out)
+	opts := map[string]string{}
+
+	for _, f := range fields {
+		if f.num == bridgeFrontendOpt {
+			k, v, _ := parseMapEntry(f.val)
+			opts[k] = v
+		}
+	}
+
+	if opts[frontendLabelAttr+LabelKey] != testName || opts["filename"] != "Dockerfile" || strings.Contains(string(out), "victim") {
+		t.Errorf("options %v", opts)
+	}
+
+	// a solve without a frontend (raw LLB) is left alone
+	raw := protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), "llb")
+	if out, _ := b.BridgeSolve(raw); string(out) != string(raw) {
+		t.Errorf("raw solve changed: %q", out)
+	}
+
+	if _, err := b.BridgeSolve([]byte{0xff, 0xff}); err == nil {
+		t.Error("malformed request allowed")
 	}
 }

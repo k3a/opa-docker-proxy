@@ -340,7 +340,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ---- 6b. BuildKit gRPC under isolation ----
 	// Image names and labels of BuildKit builds are inside the gRPC calls, so
 	// the connection is bridged instead of copied.
-	if isUpgrade && p.Isolation != nil && isGRPCPath(utils.StripVersionPrefix(r.URL.Path)) {
+	if p.Isolation != nil && isGRPCPath(utils.StripVersionPrefix(r.URL.Path)) {
+		// BuildKit upgrades to h2c, not tcp. Anything else on /grpc could not
+		// be inspected, so it is not forwarded.
+		if !isH2CUpgrade(r) {
+			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), "access denied: /grpc needs an h2c upgrade with isolation", connID)
+
+			return
+		}
+
 		p.serveGRPC(w, r, p.Isolation.BuildKit(p.dockerClient))
 
 		return
@@ -405,6 +413,12 @@ func extractClientIP(r *http.Request) string {
 func isUpgradeRequest(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Connection"), "Upgrade") &&
 		strings.EqualFold(r.Header.Get("Upgrade"), "tcp")
+}
+
+// isH2CUpgrade checks for the cleartext HTTP/2 upgrade BuildKit clients use.
+func isH2CUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Connection"), "Upgrade") &&
+		strings.EqualFold(r.Header.Get("Upgrade"), "h2c")
 }
 
 // removeSocket removes a Unix socket file if it exists.
