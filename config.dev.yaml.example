@@ -7,7 +7,7 @@
 #
 # Everything dangerous stays blocked: privileged containers, host
 # namespaces/devices, dangerous capabilities, host bind mounts, building,
-# pushing/deleting images, secrets. See config.yaml.example for all options.
+# secrets. See config.yaml.example for all options.
 #
 # Run:  opa-docker-proxy -c config.dev.yaml
 
@@ -35,7 +35,13 @@ policy:
     - exec                 # docker exec (own containers only)
     - networks_write       # create/connect/remove networks (own only)
     - volumes_write        # create/remove volumes (own only)
-    - images_pull          # docker pull (images are shared, not isolated)
+    - images_pull          # docker pull (pulled images are shared, read-only)
+    - images_write         # tag/push/delete/commit — only images built or committed here
     # - build              # docker build (BuildKit needs /session and /grpc too)
+  # Which images may be pulled and run. Empty/unset = any image (convenient for
+  # development). With isolation mode "full" this also masks images pulled by
+  # others: a client only sees its own images plus the allowed ones. e.g.:
+  # allowed_images: ["alpine", "postgres", "myregistry.local/*"]
+  allowed_images: []
   # Host bind mounts stay off. Uncomment to allow specific directories:
   # allowed_bind_prefixes: ["/home/me/project/"]

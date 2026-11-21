@@ -54,7 +54,8 @@ policy:
   #   exec                 create/start exec instances
   #   build                image build (/build, /session, /grpc)
   #   images_pull          pull images (POST /images/create)
-  #   images_write         push/tag/load/commit/prune/delete images
+  #   images_write         push/tag/load/commit/prune/delete images (with isolation:
+  #                        only images built or committed through the proxy)
   #   volumes_write        create/delete volumes
   #   networks_write       create/delete/connect networks
   #   secrets_configs_read GET /secrets, /configs, /swarm/unlockkey
@@ -79,6 +80,14 @@ policy:
   # MAC_ADMIN, MAC_OVERRIDE, NET_ADMIN, PERFMON, SYS_ADMIN, SYS_BOOT,
   # SYS_MODULE, SYS_PTRACE, SYS_RAWIO, SYS_TIME.
   allowed_capabilities: []
+
+  # Image reference patterns (glob; "*" matches anything) that may be pulled
+  # and run. Empty = any image. "alpine" matches every tag of alpine,
+  # "alpine:3.19" only that tag. Local images by ID (sha256:...) are denied
+  # when this is set. Image builds (FROM) are not covered.
+  allowed_images: []
+  #  - alpine
+  #  - myregistry.local/*
 
   # Client networks allowed to use the proxy (Unix socket clients always are).
   # Default: loopback and RFC1918 ranges.

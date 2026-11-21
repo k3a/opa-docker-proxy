@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -75,6 +76,13 @@ func New(cfg config.Config, opaEngine *opa.Engine, iso *isolation.Isolation) (*P
 		},
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
+			// Hide other isolation contexts' images from image lists.
+			if iso != nil {
+				if err := iso.FilterResponse(resp); err != nil {
+					return err
+				}
+			}
+
 			// Log the response (NOT called for 101 upgrade responses).
 			if logAllowed {
 				clientIP, _ := resp.Request.Context().Value(clientIPKey).(string)
@@ -350,6 +358,7 @@ func buildOPAInput(r *http.Request, bodyBytes []byte, clientIP string) map[strin
 		"api_ver":   apiVer,
 		"path":      path,
 		"body":      string(bodyBytes),
+		"query":     queryMap(r.URL.Query()),
 		"headers":   flattenHeaders(r.Header),
 		"client_ip": clientIP,
 	}
@@ -408,4 +417,21 @@ func removeSocket(path string) error {
 	}
 
 	return err
+}
+
+// queryMap converts url.Values to plain JSON-compatible data for OPA:
+// {"fromImage": ["alpine"], ...}.
+func queryMap(v url.Values) map[string]any {
+	out := make(map[string]any, len(v))
+
+	for k, vals := range v {
+		list := make([]any, len(vals))
+		for n, s := range vals {
+			list[n] = s
+		}
+
+		out[k] = list
+	}
+
+	return out
 }

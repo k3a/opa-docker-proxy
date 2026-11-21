@@ -135,24 +135,22 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, cfg.Validate()
 }
 
-// unscopedAlways are policy.allow tokens that change objects the isolation
-// can not attribute to a client (images carry no ownership label).
-var unscopedAlways = map[string]bool{"images_write": true}
-
 // unscopedWithoutIsolation are policy.allow tokens that change existing
 // objects, which is only scoped to the client's own when isolation is on.
+// (images_write is scoped too: with isolation, only images built or
+// committed through the proxy can be deleted, pushed or tagged.)
 var unscopedWithoutIsolation = map[string]bool{
 	"containers_control": true,
 	"containers_delete":  true,
 	"exec":               true,
 	"volumes_write":      true,
 	"networks_write":     true,
+	"images_write":       true,
 }
 
 // UnscopedWriteTokens returns the policy.allow entries that let clients
-// change objects they did not create. Without isolation that is every enabled
-// write token that touches existing objects; with isolation only the ones
-// isolation can not cover.
+// change objects they did not create: every enabled write token that touches
+// existing objects, unless isolation is on.
 func (c Config) UnscopedWriteTokens(isolated bool) []string {
 	list, _ := c.Policy["allow"].([]any)
 
@@ -160,7 +158,7 @@ func (c Config) UnscopedWriteTokens(isolated bool) []string {
 
 	for _, v := range list {
 		t, _ := v.(string)
-		if unscopedAlways[t] || (!isolated && unscopedWithoutIsolation[t]) {
+		if !isolated && unscopedWithoutIsolation[t] {
 			out = append(out, t)
 		}
 	}

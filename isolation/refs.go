@@ -9,6 +9,9 @@ import (
 type reference struct {
 	typ ResourceType
 	id  string
+	// noCreate: do not pre-create a missing volume (non-default driver; it is
+	// labelled through the mount's VolumeOptions instead).
+	noCreate bool
 }
 
 // builtinNetworks exist on every daemon and carry no label.
@@ -73,10 +76,14 @@ func containerMode(mode string) (string, bool) {
 func createReferences(body map[string]any) []reference {
 	var refs []reference
 
-	container := func(id string) { refs = append(refs, reference{ResourceContainer, id}) }
+	for _, img := range strs(lookup(body, "Image")) {
+		refs = append(refs, reference{typ: ResourceImage, id: img})
+	}
+
+	container := func(id string) { refs = append(refs, reference{typ: ResourceContainer, id: id}) }
 	network := func(name string) {
 		if !builtinNetworks[name] {
-			refs = append(refs, reference{ResourceNetwork, name})
+			refs = append(refs, reference{typ: ResourceNetwork, id: name})
 		}
 	}
 
@@ -110,7 +117,7 @@ func createReferences(body map[string]any) []reference {
 		for _, entry := range strs(lookup(hc, "Binds")) {
 			parts := strings.Split(entry, ":")
 			if len(parts) >= 2 && volumeName.MatchString(parts[0]) {
-				refs = append(refs, reference{ResourceVolume, parts[0]})
+				refs = append(refs, reference{typ: ResourceVolume, id: parts[0], noCreate: foreignDriver(hc)})
 			}
 		}
 
@@ -122,7 +129,7 @@ func createReferences(body map[string]any) []reference {
 
 				for _, src := range strs(lookup(mount, "Source")) {
 					if src != "" {
-						refs = append(refs, reference{ResourceVolume, src})
+						refs = append(refs, reference{typ: ResourceVolume, id: src, noCreate: foreignDriver(hc) || mountDriverIsForeign(mount)})
 					}
 				}
 			}
@@ -146,8 +153,36 @@ func membershipReferences(body map[string]any) []reference {
 	var refs []reference
 
 	for _, id := range strs(lookup(body, "Container")) {
-		refs = append(refs, reference{ResourceContainer, id})
+		refs = append(refs, reference{typ: ResourceContainer, id: id})
 	}
 
 	return refs
+}
+
+// foreignDriver reports whether HostConfig.VolumeDriver names a non-default
+// volume driver.
+func foreignDriver(hc map[string]any) bool {
+	for _, d := range strs(lookup(hc, "VolumeDriver")) {
+		if d != "" && d != "local" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// mountDriverIsForeign reports whether a volume mount selects a non-default
+// volume driver.
+func mountDriverIsForeign(mount map[string]any) bool {
+	for _, vo := range objects(lookup(mount, "VolumeOptions")) {
+		for _, dc := range objects(lookup(vo, "DriverConfig")) {
+			for _, n := range strs(lookup(dc, "Name")) {
+				if n != "" && n != "local" {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }

@@ -51,8 +51,7 @@ func TestUnscopedWriteTokens(t *testing.T) {
 		t.Errorf("without isolation: %v, want %v", got, want)
 	}
 
-	// With isolation only images (never isolated) remain unscoped.
-	if got := c.UnscopedWriteTokens(true); !slices.Equal(got, []string{"images_write"}) {
+	if got := c.UnscopedWriteTokens(true); len(got) != 0 {
 		t.Errorf("with isolation: %v", got)
 	}
 

@@ -91,6 +91,7 @@ Denials can't be overridden by any permissive rule; they are relaxed only throug
 | `01_framework.rego` | `allow` / `reason`. Don't remove. The only place that defines `allow`. |
 | `02_container_security.rego` | Hardening for `/containers/create`: privileged, host network/PID/IPC/userns, host devices, unconfined seccomp/AppArmor/SELinux, dangerous `CapAdd` (case and `CAP_` prefix normalized), bind mounts outside allowed prefixes (`Binds` and `Mounts`), volume mounts with driver options (bind bypass), unknown mount types, non-JSON body. |
 | `03_operations.rego` | The operation allowlist: read-only default plus write groups. With full isolation only reads of isolatable objects are visible (no `/system/df`, `/swarm`, …). |
+| `04_images.rego` | `allowed_images`: limit which images may be pulled and run (empty = any). |
 | `06_internal_network.rego` | Deny clients outside `allowed_client_cidrs` (Unix-socket clients exempt). |
 | `90_policy_test.rego` | `opa test` unit tests. |
 
@@ -103,6 +104,7 @@ policy:
   allow: [containers_create, containers_control, containers_delete]  # enable write groups / exempt hardening rules
   allowed_bind_prefixes: ["/dev/", "/temp/agent/"]                   # bind mounts only below these (must start+end with "/")
   allowed_capabilities: [NET_ADMIN]                                  # dangerous caps that may still be added
+  allowed_images: ["alpine", "myregistry.local/*"]                   # images that may be pulled/run (default: any)
   allowed_client_cidrs: ["10.0.0.0/8"]                               # default: loopback + RFC1918
 ```
 
@@ -126,12 +128,17 @@ Optional, so several users/projects can share one Docker daemon. Enable with `is
 | `full` (default) | The client sees a private daemon. Container/volume/network lists and `/events` are filtered by label; every per-resource request — reads included — is checked by inspecting the resource, a mismatch is 403. `exec` into a container requires owning it. Daemon-wide endpoints that can't be filtered (`/system/df`, `/swarm`, …) are hidden by the policies. |
 | `writes` | Reads are unrestricted; only requests that change something (and websocket attach) are checked. Prune is scoped by label in both modes. |
 
-In both modes, container creation can't *reference* resources outside the isolation context: `VolumesFrom`, `container:<id>` network/PID/IPC modes, `Links`, networks (`NetworkMode`, `EndpointsConfig`) and named volumes (`Binds`, volume `Mounts`) are checked; names that don't exist yet are left to the daemon. `networks/{id}/connect|disconnect` also checks the named container. Built-in networks (`bridge`, `none`, …) are always usable.
+In both modes:
+
+- **References.** Container creation can't *reference* resources outside the isolation context: `VolumesFrom`, `container:<id>` network/PID/IPC modes, `Links`, networks (`NetworkMode`, `EndpointsConfig`), named volumes (`Binds`, volume `Mounts`) and the image are checked. `networks/{id}/connect|disconnect`, `commit` and `images/get` check the container/images they name. Built-in networks (`bridge`, `none`, …) are always usable.
+- **Volumes are always labelled.** Named volumes that don't exist yet are created by the proxy (with the label) before the container is created, so the daemon never creates unlabelled ones implicitly. Anonymous volumes — single-element `Binds` (`"/data"`), `Volumes`, and volumes declared by the image (`VOLUME`) — are turned into labelled volume mounts (not done together with `VolumesFrom`; volumes using a non-`local` driver are labelled through their mount options instead of pre-created).
+- **Images have three states.** *Own* — built or committed through the proxy, labelled; fully usable. *Foreign* — labelled for another isolation name; can't be used, inspected, exported or listed (`full`). *Shared* — unlabelled, i.e. pulled or public (a pull can't carry a label); usable, but read-only: can't be deleted, pushed or tagged through the proxy, so `images_write` only affects own images. **If `policy.allowed_images` is set, shared images are masked by it:** a shared image is only visible (list, inspect, history, export) and usable (container create) if its typed name or one of its repo tags/digests matches. So a client sees its own images plus the allowed ones — images pulled by others and not on the list don't exist for it. Matching an image *ID* works through its tags. `docker commit` labels the new image and requires an own container.
+- `policy.allowed_images` also controls which images may be pulled and run (policy), and — with isolation — is the mask described above. Own images (built/committed through the proxy) are always usable.
 
 Limitations:
-- **Images are shared.** A pulled image carries no label, so images are neither filtered nor checked (`images_write` — push/delete — is therefore not scoped; the proxy warns if you enable it). Images built through the proxy are labelled.
-- A named volume that doesn't exist and is created implicitly through `Binds` (`"newvol:/data"`) is created *without* the label. Create volumes explicitly (`volumes_write`) or use `Mounts` of type `volume`, which are labelled.
-- Starting the proxy with change-capable `policy.allow` tokens (`containers_control`, `containers_delete`, `exec`, `volumes_write`, `networks_write`) **without** isolation logs a warning: clients could then change objects they didn't create.
+- Without `policy.allowed_images`, pulled (shared) images are visible to every client of the daemon. Set it to mask them (in `full` mode; in `writes` mode reads are open by definition, but creating containers is still restricted).
+- Image builds can't be checked for `FROM` of a foreign image.
+- Starting the proxy with change-capable `policy.allow` tokens (`containers_control`, `containers_delete`, `exec`, `volumes_write`, `networks_write`, `images_write`) **without** isolation logs a warning: clients could then change objects they didn't create.
 
 To remove the feature: delete `isolation/`, the isolation handling in `main.go`, and the few calls in `proxy.go`.
 

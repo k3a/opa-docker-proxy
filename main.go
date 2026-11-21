@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -63,8 +64,7 @@ func main() {
 
 	if tokens := cfg.UnscopedWriteTokens(iso != nil); len(tokens) > 0 {
 		slog.Warn("policy.allow lets clients change objects they did not create; "+
-			"enable isolation to restrict this to resources created through the proxy "+
-			"(images are never isolated)", "tokens", tokens)
+			"enable isolation to restrict this to resources created through the proxy", "tokens", tokens)
 	}
 
 	// Facts for the policies that users can not configure.
@@ -83,6 +83,13 @@ func main() {
 	}
 
 	slog.Info("OPA policies loaded", "policies_path", cfg.PoliciesPath)
+
+	if iso != nil {
+		// policy.allowed_images also masks pulled (shared) images.
+		iso.ImageVisible = func(refs []string) bool {
+			return opaEngine.ImageVisible(context.Background(), refs)
+		}
+	}
 
 	// Create the proxy.
 	p, err := proxy.New(cfg, opaEngine, iso)

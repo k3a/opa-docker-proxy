@@ -20,6 +20,10 @@ default_config := {
 	# Capabilities (without CAP_ prefix) that may be added even though they
 	# are on the dangerous list.
 	"allowed_capabilities": [],
+	# Image reference patterns (glob, "*" matches any characters) that may be
+	# pulled and run. Empty = any image. A pattern without tag ("alpine")
+	# matches every tag and digest of that repository.
+	"allowed_images": [],
 	# Client networks allowed to talk to the proxy (Unix socket clients are
 	# always allowed).
 	"allowed_client_cidrs": [
@@ -98,6 +102,12 @@ config_errors contains sprintf("policy.allowed_bind_prefixes entry %q must start
 	is_string_list(cfg.allowed_bind_prefixes)
 	some p in cfg.allowed_bind_prefixes
 	not valid_bind_prefix(p)
+}
+
+config_errors contains sprintf("policy.allowed_images entry %q must not be empty", [p]) if {
+	is_string_list(cfg.allowed_images)
+	some p in cfg.allowed_images
+	trim_space(p) == ""
 }
 
 config_errors contains sprintf("policy.allowed_client_cidrs entry %q is not a valid CIDR", [c]) if {

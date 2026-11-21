@@ -20,6 +20,8 @@ import (
 // Engine holds compiled Rego policies and can evaluate them.
 type Engine struct {
 	prepared rego.PreparedEvalQuery
+	// imageVisible evaluates data.policies.image_visible(input.refs).
+	imageVisible rego.PreparedEvalQuery
 }
 
 // NewEngine loads all .rego files from the given directory and prepares a
@@ -86,8 +88,18 @@ func NewEngine(polDir string, allowOPAPrint bool, policyConfig, runtime map[stri
 		return nil, fmt.Errorf("prepare rego query: %w", err)
 	}
 
+	visible, err := rego.New(
+		rego.Query("visible = data.policies.image_visible(input.refs)"),
+		rego.Compiler(compiler),
+		rego.Store(store),
+	).PrepareForEval(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("prepare image visibility query: %w", err)
+	}
+
 	return &Engine{
-		prepared: prepared,
+		prepared:     prepared,
+		imageVisible: visible,
 	}, nil
 }
 
@@ -212,6 +224,24 @@ func (e *Engine) Evaluate(ctx context.Context, input map[string]any) (*EvalResul
 	}
 
 	return &EvalResult{Allowed: false, Reason: reason}, nil
+}
+
+// ImageVisible reports whether an image with the given references (the name
+// used, its repo tags and digests) is acceptable under policy.allowed_images.
+// Any error is treated as "not visible".
+func (e *Engine) ImageVisible(ctx context.Context, refs []string) bool {
+	if refs == nil {
+		refs = []string{}
+	}
+
+	rs, err := e.imageVisible.Eval(ctx, rego.EvalInput(map[string]any{"refs": refs}))
+	if err != nil {
+		slog.Error("image visibility evaluation failed", "error", err)
+
+		return false
+	}
+
+	return len(rs) > 0 && rs[0].Bindings["visible"] == true
 }
 
 // findRegoFiles returns all .rego files in dir (non-recursive).

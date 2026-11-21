@@ -343,3 +343,95 @@ test_config_invalid_denies_everything if {
 	not allow with input as req("GET", "/_ping") with data.config as {"allow": ["privilged"]}
 	not allow with input as req("GET", "/_ping") with data.config as "nope"
 }
+
+# ---------------------------------------------------------------------------
+# allowed_images
+# ---------------------------------------------------------------------------
+
+create_image(img) := {
+	"method": "POST",
+	"path": "/containers/create",
+	"client_ip": "@",
+	"body": {"Image": img},
+}
+
+pull(q) := {"method": "POST", "path": "/images/create", "client_ip": "@", "query": q}
+
+images_cfg(patterns) := {"allow": ["containers_create", "images_pull"], "allowed_images": patterns}
+
+test_images_unrestricted_by_default if {
+	allow with input as create_image("anything/at:all") with data.config as create_cfg({})
+	allow with input as pull({"fromImage": ["evil/img"]}) with data.config as {"allow": ["images_pull"]}
+}
+
+test_images_create_allowlist if {
+	cfg := images_cfg(["alpine", "myreg.local/*", "busybox:1.36"])
+	allow with input as create_image("alpine") with data.config as cfg
+	allow with input as create_image("alpine:3.19") with data.config as cfg
+	allow with input as create_image("alpine@sha256:abc") with data.config as cfg
+	allow with input as create_image("myreg.local/team/app:v1") with data.config as cfg
+	allow with input as create_image("busybox:1.36") with data.config as cfg
+	not allow with input as create_image("busybox:latest") with data.config as cfg
+	not allow with input as create_image("busybox") with data.config as cfg
+	not allow with input as create_image("evil/alpine") with data.config as cfg
+	not allow with input as create_image("alpine.evil.com/x") with data.config as cfg
+	not allow with input as create_image("sha256:0123456789ab") with data.config as cfg
+}
+
+test_images_registry_port_is_not_a_tag if {
+	cfg := images_cfg(["localhost:5000/app"])
+	allow with input as create_image("localhost:5000/app") with data.config as cfg
+	allow with input as create_image("localhost:5000/app:2") with data.config as cfg
+	not allow with input as create_image("localhost:5000/other") with data.config as cfg
+}
+
+test_images_pull_allowlist if {
+	cfg := images_cfg(["alpine"])
+	allow with input as pull({"fromImage": ["alpine"]}) with data.config as cfg
+	allow with input as pull({"fromImage": ["alpine"], "tag": ["3.19"]}) with data.config as cfg
+	allow with input as pull({"fromImage": ["alpine:3.19"]}) with data.config as cfg
+	not allow with input as pull({"fromImage": ["evil/img"], "tag": ["latest"]}) with data.config as cfg
+	not allow with input as pull({"fromImage": ["evil/img"]}) with data.config as cfg
+	not allow with input as pull({"fromSrc": ["http://evil/img.tar"], "repo": ["alpine"]}) with data.config as cfg
+}
+
+test_images_pull_tag_cannot_smuggle if {
+	cfg := images_cfg(["alpine:3.19"])
+	allow with input as pull({"fromImage": ["alpine"], "tag": ["3.19"]}) with data.config as cfg
+	not allow with input as pull({"fromImage": ["alpine"], "tag": ["latest"]}) with data.config as cfg
+}
+
+test_images_message if {
+	r := reason with input as create_image("evil") with data.config as images_cfg(["alpine"])
+	contains(r, "allowed_images")
+}
+
+test_config_allowed_images_validation if {
+	count(config_errors) == 0 with data.config as {"allowed_images": ["alpine", "r/*"]}
+	count(config_errors) > 0 with data.config as {"allowed_images": "alpine"}
+	count(config_errors) > 0 with data.config as {"allowed_images": [""]}
+}
+
+test_images_create_check_moves_to_proxy_with_isolation if {
+	cfg := images_cfg(["alpine"])
+	not allow with input as create_image("evil") with data.config as cfg
+	# the proxy (isolation) decides about image use, incl. own images
+	allow with input as create_image("myown") with data.config as cfg with data.runtime as {"isolation": {"mode": "full"}}
+	allow with input as create_image("myown") with data.config as cfg with data.runtime as {"isolation": {"mode": "writes"}}
+	# pulls are still checked by policy
+	not allow with input as pull({"fromImage": ["evil"]}) with data.config as cfg with data.runtime as {"isolation": {"mode": "full"}}
+}
+
+test_image_visible_unrestricted if {
+	image_visible(["anything"]) with data.config as {}
+	image_visible([]) with data.config as {}
+}
+
+test_image_visible_restricted if {
+	cfg := {"allowed_images": ["alpine", "myreg/*"]}
+	image_visible(["sha256:abc", "alpine:3.19"]) with data.config as cfg
+	image_visible(["sha256:abc", "myreg/app:1@sha256:ff"]) with data.config as cfg
+	not image_visible(["sha256:abc"]) with data.config as cfg
+	not image_visible(["evil:1"]) with data.config as cfg
+	not image_visible([]) with data.config as cfg
+}

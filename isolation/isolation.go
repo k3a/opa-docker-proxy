@@ -14,8 +14,11 @@
 //   - ModeWrites: reads are untouched; only requests that change something
 //     are checked (and prune is scoped by label).
 //
-// Images are shared in both modes: pulled images carry no label, so they
-// can not be attributed to a client.
+// Images need special treatment because a pull can not be labelled. They have
+// three states: "ours" (built or committed through this proxy, labelled),
+// "foreign" (labelled for another isolation name: unusable) and "shared"
+// (unlabelled: pulled or public; usable but read-only, i.e. can not be
+// deleted, pushed or tagged through the proxy).
 //
 // The entire package is self-contained and can be removed by deleting the
 // isolation/ directory, removing the flag handling in main.go, and removing
@@ -78,6 +81,12 @@ func (rt ResourceType) String() string {
 type Isolation struct {
 	Name string
 	Mode Mode
+
+	// ImageVisible, when set, decides whether a shared (unlabelled) image may
+	// be seen and used, given its references: the name the client used plus
+	// its repo tags and digests. It is how policy.allowed_images masks pulled
+	// images. Nil means every shared image is visible.
+	ImageVisible func(refs []string) bool
 }
 
 // Mode selects how much of the Docker API is isolated.
@@ -225,6 +234,20 @@ func isCreatePath(path string) bool {
 	return createEndpoints[cleaned]
 }
 
+// isCommitPath returns true for the endpoint that turns a container into an
+// image.
+func isCommitPath(path string) bool {
+	return utils.StripVersionPrefix(path) == "/commit"
+}
+
+// setBody replaces the request body and fixes the length headers so the
+// reverse proxy doesn't forward a stale Content-Length to Docker.
+func setBody(r *http.Request, body []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", fmt.Sprint(len(body)))
+}
+
 // isBuildPath returns true when the path is the Docker build endpoint.
 func isBuildPath(path string) bool {
 	cleaned := utils.StripVersionPrefix(path)
@@ -286,7 +309,7 @@ func (i *Isolation) TransformRequest(r *http.Request) {
 	path := r.URL.Path
 
 	switch {
-	case isCreatePath(path):
+	case isCreatePath(path) || isCommitPath(path):
 		// Inject labels into JSON body
 		body, err := io.ReadAll(r.Body)
 		if errc := r.Body.Close(); errc != nil {
@@ -297,12 +320,14 @@ func (i *Isolation) TransformRequest(r *http.Request) {
 			return
 		}
 
-		modified := i.injectBodyLabels(body)
-		r.Body = io.NopCloser(bytes.NewReader(modified))
-		// Update Content-Length to match the new body size so the
-		// reverse proxy doesn't forward a stale length to Docker.
-		r.ContentLength = int64(len(modified))
-		r.Header.Set("Content-Length", fmt.Sprint(len(modified)))
+		// commit takes an optional body; make sure there is one to label.
+		if isCommitPath(path) && len(bytes.TrimSpace(body)) == 0 {
+			body = []byte("{}")
+
+			r.Header.Set("Content-Type", "application/json")
+		}
+
+		setBody(r, i.injectBodyLabels(body))
 
 	case isBuildPath(path):
 		i.injectBuildLabels(r.URL)
@@ -329,7 +354,7 @@ func (i *Isolation) CheckAccess(ctx context.Context, dockerClient *http.Client, 
 		return nil
 	}
 
-	if err := i.checkTarget(ctx, dockerClient, r.URL.Path); err != nil {
+	if err := i.checkTarget(ctx, dockerClient, r.Method, r.URL.Path); err != nil {
 		return err
 	}
 
@@ -337,7 +362,11 @@ func (i *Isolation) CheckAccess(ctx context.Context, dockerClient *http.Client, 
 }
 
 // checkTarget checks the resource addressed by the request path.
-func (i *Isolation) checkTarget(ctx context.Context, dockerClient *http.Client, path string) error {
+func (i *Isolation) checkTarget(ctx context.Context, dockerClient *http.Client, method, path string) error {
+	if name, write, ok := imageTarget(utils.StripVersionPrefix(path), method); ok {
+		return i.checkImage(ctx, dockerClient, name, write)
+	}
+
 	rt, id, ok := resourceTypeAndID(path)
 	if !ok {
 		return nil // not a resource-specific endpoint
@@ -361,53 +390,211 @@ func (i *Isolation) checkTarget(ctx context.Context, dockerClient *http.Client, 
 
 var networkMembershipPath = regexp.MustCompile(`^/networks/[^/]+/(connect|disconnect)$`)
 
-// checkReferences checks resources referenced from the request body.
-func (i *Isolation) checkReferences(ctx context.Context, client *http.Client, r *http.Request) error {
-	if r.Method != http.MethodPost {
-		return nil
-	}
-
-	cleaned := utils.StripVersionPrefix(r.URL.Path)
-
-	var extract func(map[string]any) []reference
-
-	switch {
-	case cleaned == "/containers/create":
-		extract = createReferences
-	case networkMembershipPath.MatchString(cleaned):
-		extract = membershipReferences
-	default:
-		return nil
-	}
-
+// readJSONBody reads the request body as a JSON object and restores it.
+// ok is false when the body is not a JSON object.
+func readJSONBody(r *http.Request) (data map[string]any, ok bool, err error) {
 	body, err := io.ReadAll(r.Body)
 	if errc := r.Body.Close(); errc != nil {
 		slog.Warn("failed to close request body", "error", errc)
 	}
 
 	if err != nil {
-		return fmt.Errorf("read request body: %w", err)
+		return nil, false, fmt.Errorf("read request body: %w", err)
 	}
 
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
-		return nil // not a JSON object; the policy layer decides
+		return nil, false, nil //nolint:nilerr // not a JSON object; the policy layer decides
 	}
 
-	for _, ref := range extract(data) {
+	return data, true, nil
+}
+
+// checkReferences checks resources named in query or body of a request.
+func (i *Isolation) checkReferences(ctx context.Context, client *http.Client, r *http.Request) error {
+	cleaned := utils.StripVersionPrefix(r.URL.Path)
+
+	var refs []reference
+
+	switch {
+	case r.Method == http.MethodPost && cleaned == "/containers/create":
+		return i.checkCreate(ctx, client, r)
+
+	case r.Method == http.MethodPost && networkMembershipPath.MatchString(cleaned):
+		data, ok, err := readJSONBody(r)
+		if err != nil || !ok {
+			return err
+		}
+
+		refs = membershipReferences(data)
+
+	case r.Method == http.MethodPost && cleaned == "/commit":
+		for _, c := range r.URL.Query()["container"] {
+			refs = append(refs, reference{typ: ResourceContainer, id: c})
+		}
+
+	case r.Method == http.MethodGet && cleaned == "/images/get":
+		for _, n := range r.URL.Query()["names"] {
+			refs = append(refs, reference{typ: ResourceImage, id: n})
+		}
+
+	default:
+		return nil
+	}
+
+	_, err := i.checkRefs(ctx, client, refs)
+
+	return err
+}
+
+// checkRefs denies references to foreign resources. It returns the
+// references that do not exist (yet).
+func (i *Isolation) checkRefs(ctx context.Context, client *http.Client, refs []reference) ([]reference, error) {
+	var missing []reference
+
+	for _, ref := range refs {
 		st, err := i.ownership(ctx, client, ref.typ, ref.id)
 		if err != nil {
-			return fmt.Errorf("isolation check for %v %s: %w", ref.typ, ref.id, err)
+			return nil, fmt.Errorf("isolation check for %v %s: %w", ref.typ, ref.id, err)
 		}
 
-		if st == foreign {
-			return fmt.Errorf("access denied: referenced %v %q is not part of this isolation context", ref.typ, ref.id)
+		switch st {
+		case foreign:
+			return nil, fmt.Errorf("access denied: referenced %v %q is not part of this isolation context", ref.typ, ref.id)
+		case hidden:
+			return nil, fmt.Errorf("access denied: image %q is not permitted (policy.allowed_images)", ref.id)
+		case notFound:
+			missing = append(missing, ref)
+		case owned, shared:
 		}
 	}
 
-	return nil
+	return missing, nil
+}
+
+type ownershipState int
+
+const (
+	owned ownershipState = iota
+	foreign
+	notFound
+	// shared is an unlabelled image: usable by everyone, owned by no one.
+	shared
+	// hidden is a shared image that policy.allowed_images does not permit.
+	hidden
+)
+
+// checkResource inspects a Docker resource and verifies it carries the
+// isolation label. A missing resource is reported as not accessible.
+func (i *Isolation) checkResource(ctx context.Context, client *http.Client, rt ResourceType, id string) (bool, string, error) {
+	st, err := i.ownership(ctx, client, rt, id)
+	if err != nil {
+		return false, "", err
+	}
+
+	switch st {
+	case owned:
+		return true, "", nil
+	case notFound:
+		return false, "resource not found", nil
+	default:
+		return false, fmt.Sprintf("resource lacks isolation label %s=%s", LabelKey, i.Name), nil
+	}
+}
+
+// inspectJSON GETs an inspect path from the daemon. found is false on 404.
+func inspectJSON(ctx context.Context, client *http.Client, inspectPath string) (data map[string]any, found bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+inspectPath, nil)
+	if err != nil {
+		return nil, false, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("inspect %s: %w", inspectPath, err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("failed to close inspect body", "error", err, "path", inspectPath)
+		}
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return nil, false, nil
+	case http.StatusOK:
+		// proceed
+	default:
+		return nil, false, fmt.Errorf("inspect %s returned HTTP %d", inspectPath, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, fmt.Errorf("read inspect body: %w", err)
+	}
+
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, false, fmt.Errorf("parse inspect response: %w", err)
+	}
+
+	return data, true, nil
+}
+
+// ownership inspects a resource and classifies it.
+func (i *Isolation) ownership(ctx context.Context, client *http.Client, rt ResourceType, id string) (ownershipState, error) {
+	// id may come from a request body: escape it so it can not alter the
+	// inspected path.
+	var inspectPath string
+
+	switch rt {
+	case ResourceContainer:
+		inspectPath = "/containers/" + url.PathEscape(id) + "/json"
+	case ResourceImage:
+		inspectPath = "/images/" + escapeRef(id) + "/json"
+	case ResourceVolume:
+		inspectPath = "/volumes/" + url.PathEscape(id)
+	case ResourceNetwork:
+		inspectPath = "/networks/" + url.PathEscape(id)
+	default:
+		return foreign, fmt.Errorf("unsupported resource type %v", rt)
+	}
+
+	data, found, err := inspectJSON(ctx, client, inspectPath)
+	if err != nil {
+		return foreign, err
+	}
+
+	if !found {
+		return notFound, nil
+	}
+
+	// Docker resources store labels in different places:
+	//   - Containers: .Config.Labels
+	//   - Volumes:    top-level .Labels
+	//   - Networks:   top-level .Labels
+	//   - Images:     .Config.Labels (set at build/commit time only)
+	var labels map[string]any
+	if cfg, ok := data["Config"].(map[string]any); ok {
+		labels, _ = cfg["Labels"].(map[string]any)
+	} else if l, ok := data["Labels"].(map[string]any); ok {
+		labels = l
+	}
+
+	val, labelled := labels[LabelKey]
+
+	switch {
+	case labelled && fmt.Sprint(val) == i.Name:
+		return owned, nil
+	case !labelled && rt == ResourceImage:
+		if i.ImageVisible != nil && !i.ImageVisible(imageRefs(id, data)) {
+			return hidden, nil
+		}
+
+		return shared, nil
+	default:
+		return foreign, nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -536,142 +723,16 @@ func (i *Isolation) injectBuildLabels(u *url.URL) {
 	u.RawQuery = q.Encode()
 }
 
-type ownershipState int
-
-const (
-	owned ownershipState = iota
-	foreign
-	notFound
-)
-
-// checkResource inspects a Docker resource and verifies it carries the
-// isolation label. A missing resource is reported as not accessible.
-func (i *Isolation) checkResource(ctx context.Context, client *http.Client, rt ResourceType, id string) (bool, string, error) {
-	st, err := i.ownership(ctx, client, rt, id)
-	if err != nil {
-		return false, "", err
-	}
-
-	switch st {
-	case owned:
-		return true, "", nil
-	case notFound:
-		return false, "resource not found", nil
-	default:
-		return false, fmt.Sprintf("resource lacks isolation label %s=%s", LabelKey, i.Name), nil
-	}
-}
-
-// ownership inspects a resource and classifies it.
-func (i *Isolation) ownership(ctx context.Context, client *http.Client, rt ResourceType, id string) (ownershipState, error) {
-	// id may come from a request body: escape it so it can not alter the
-	// inspected path.
-	eid := url.PathEscape(id)
-
-	var inspectPath string
-
-	switch rt {
-	case ResourceContainer:
-		inspectPath = "/containers/" + eid + "/json"
-	case ResourceImage:
-		inspectPath = "/images/" + eid + "/json"
-	case ResourceVolume:
-		inspectPath = "/volumes/" + eid
-	case ResourceNetwork:
-		inspectPath = "/networks/" + eid
-	default:
-		return foreign, fmt.Errorf("unsupported resource type %v", rt)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+inspectPath, nil)
-	if err != nil {
-		return foreign, err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return foreign, fmt.Errorf("inspect %s: %w", inspectPath, err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Warn("failed to close inspect body", "error", err, "path", inspectPath)
-		}
-	}()
-
-	switch resp.StatusCode {
-	case http.StatusNotFound:
-		return notFound, nil
-	case http.StatusOK:
-		// proceed
-	default:
-		return foreign, fmt.Errorf("inspect %s returned HTTP %d", inspectPath, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return foreign, fmt.Errorf("read inspect body: %w", err)
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal(body, &data); err != nil {
-		return foreign, fmt.Errorf("parse inspect response: %w", err)
-	}
-
-	// Docker resources store labels in different places:
-	//   - Containers: .Config.Labels
-	//   - Volumes:    top-level .Labels
-	//   - Networks:   top-level .Labels
-	//   - Images:     .Config.Labels (but labels are set at build time only)
-	var labels map[string]any
-	if cfg, ok := data["Config"].(map[string]any); ok {
-		labels, _ = cfg["Labels"].(map[string]any)
-	} else if l, ok := data["Labels"].(map[string]any); ok {
-		labels = l
-	}
-
-	if val, ok := labels[LabelKey]; !ok || fmt.Sprint(val) != i.Name {
-		return foreign, nil
-	}
-
-	return owned, nil
-}
-
 // checkExecContainer inspects an exec instance to find its parent container,
 // then checks that container for the isolation label.
 func (i *Isolation) checkExecContainer(ctx context.Context, client *http.Client, execID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/exec/"+url.PathEscape(execID)+"/json", nil)
-
+	data, found, err := inspectJSON(ctx, client, "/exec/"+url.PathEscape(execID)+"/json")
 	if err != nil {
 		return err
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("inspect exec %s: %w", execID, err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Warn("failed to close exec body", "error", err, "exec_id", execID)
-		}
-	}()
-
-	switch resp.StatusCode {
-	case http.StatusNotFound:
+	if !found {
 		return fmt.Errorf("exec instance %s not found", execID)
-	case http.StatusOK:
-		// proceed
-	default:
-		return fmt.Errorf("inspect exec %s returned HTTP %d", execID, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read exec body: %w", err)
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal(body, &data); err != nil {
-		return fmt.Errorf("parse exec response: %w", err)
 	}
 
 	containerID, ok := data["ContainerID"].(string)
