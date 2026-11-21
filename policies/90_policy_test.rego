@@ -36,6 +36,7 @@ test_default_denies_all_writes if {
 		["POST", "/exec/abc/start"],
 		["POST", "/build"],
 		["POST", "/images/create"],
+		["POST", "/images/abc/push"],
 		["DELETE", "/images/abc"],
 		["POST", "/volumes/create"],
 		["POST", "/networks/create"],
@@ -63,6 +64,37 @@ test_unknown_endpoint_write_denied_even_with_groups if {
 test_denial_message_hints_at_token if {
 	r := reason with input as req("POST", "/containers/abc/start") with data.config as {}
 	contains(r, "containers_control")
+}
+
+# ---------------------------------------------------------------------------
+# Isolation (data.runtime.isolation.mode)
+# ---------------------------------------------------------------------------
+
+test_isolation_full_hides_global_reads if {
+	full := {"isolation": {"mode": "full"}}
+	allow with input as req("GET", "/containers/json") with data.config as {} with data.runtime as full
+	allow with input as req("GET", "/events") with data.config as {} with data.runtime as full
+	allow with input as req("GET", "/version") with data.config as {} with data.runtime as full
+	allow with input as req("GET", "/images/alpine/json") with data.config as {} with data.runtime as full
+	not allow with input as req("GET", "/system/df") with data.config as {} with data.runtime as full
+	not allow with input as req("GET", "/swarm") with data.config as {} with data.runtime as full
+	not allow with input as req("GET", "/nodes") with data.config as {} with data.runtime as full
+	not allow with input as req("GET", "/plugins") with data.config as {} with data.runtime as full
+}
+
+test_isolation_full_message if {
+	r := reason with input as req("GET", "/system/df") with data.config as {} with data.runtime as {"isolation": {"mode": "full"}}
+	contains(r, "isolated mode")
+}
+
+test_isolation_off_or_writes_keeps_reads_open if {
+	allow with input as req("GET", "/system/df") with data.config as {}
+	allow with input as req("GET", "/system/df") with data.config as {} with data.runtime as {"isolation": {"mode": "writes"}}
+	allow with input as req("GET", "/system/df") with data.config as {} with data.runtime as {"isolation": {"mode": "off"}}
+}
+
+test_isolation_does_not_enable_writes if {
+	not allow with input as req("POST", "/containers/create") with data.config as {} with data.runtime as {"isolation": {"mode": "full"}}
 }
 
 # ---------------------------------------------------------------------------
@@ -98,8 +130,17 @@ test_group_build if {
 	not allow with input as req("POST", "/images/create") with data.config as cfg
 }
 
+test_group_images_pull_is_separate if {
+	allow with input as req("POST", "/images/create") with data.config as {"allow": ["images_pull"]}
+	not allow with input as req("DELETE", "/images/abc") with data.config as {"allow": ["images_pull"]}
+	not allow with input as req("POST", "/images/abc/push") with data.config as {"allow": ["images_pull"]}
+	not allow with input as req("POST", "/images/create") with data.config as {"allow": ["images_write"]}
+}
+
 test_group_images_volumes_networks if {
-	allow with input as req("POST", "/images/create") with data.config as {"allow": ["images_write"]}
+	allow with input as req("POST", "/images/abc/push") with data.config as {"allow": ["images_write"]}
+	allow with input as req("POST", "/images/library/alpine/tag") with data.config as {"allow": ["images_write"]}
+	allow with input as req("POST", "/commit") with data.config as {"allow": ["images_write"]}
 	allow with input as req("DELETE", "/images/abc") with data.config as {"allow": ["images_write"]}
 	allow with input as req("POST", "/volumes/create") with data.config as {"allow": ["volumes_write"]}
 	allow with input as req("POST", "/networks/create") with data.config as {"allow": ["networks_write"]}

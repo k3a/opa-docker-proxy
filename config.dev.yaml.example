@@ -1,0 +1,41 @@
+# opa-docker-proxy — development profile
+#
+# A practical setup for running dev tooling (docker run, compose, test
+# containers) through the proxy: containers can be created, started, stopped,
+# exec'd into and deleted, networks and volumes can be managed, images can be
+# pulled — but only on resources created through THIS proxy.
+#
+# Everything dangerous stays blocked: privileged containers, host
+# namespaces/devices, dangerous capabilities, host bind mounts, building,
+# pushing/deleting images, secrets. See config.yaml.example for all options.
+#
+# Run:  opa-docker-proxy -c config.dev.yaml
+
+listen:
+  socket: /var/run/opa-docker-proxy.sock
+docker_socket: /var/run/docker.sock
+policies_path: /etc/opa-docker-proxy/policies
+
+isolation:
+  enabled: true
+  # Label value marking this proxy's resources. Keep it stable across
+  # restarts, otherwise earlier resources become invisible. Use a different
+  # name per project/user sharing one daemon.
+  name: dev
+  # full:   the client sees a private daemon — lists, events and inspect only
+  #         show own resources, everything else is "not found"/denied.
+  # writes: reads are unrestricted; only changes are limited to own resources.
+  mode: full
+
+policy:
+  allow:
+    - containers_create    # docker run / create
+    - containers_control   # start, stop, restart, kill, attach, wait, ...
+    - containers_delete    # rm, prune   (own containers only)
+    - exec                 # docker exec (own containers only)
+    - networks_write       # create/connect/remove networks (own only)
+    - volumes_write        # create/remove volumes (own only)
+    - images_pull          # docker pull (images are shared, not isolated)
+    # - build              # docker build (BuildKit needs /session and /grpc too)
+  # Host bind mounts stay off. Uncomment to allow specific directories:
+  # allowed_bind_prefixes: ["/home/me/project/"]

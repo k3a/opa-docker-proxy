@@ -26,12 +26,12 @@ DOCKER_HOST=unix:///var/run/opa-docker-proxy.sock docker ps
 | Flag | Meaning |
 |------|---------|
 | `-c <path>` | Config file. Without it, `/etc/opa-docker-proxy/config.yaml` is used if present, otherwise built-in defaults. An explicit path must exist. |
-| `-i` | Enable isolation; name defaults to first 16 hex chars of SHA-256 of the CWD |
-| `--isolation-name <name>` | Explicit isolation name (implies `-i`) |
+| `-i` | Enable isolation (also settable in the config); name defaults to first 16 hex chars of SHA-256 of the CWD |
+| `--isolation-name <name>` | Explicit isolation name (implies `-i`, overrides `isolation.name`) |
 
 ## Configuration
 
-YAML file; defaults are applied first, then overridden by the file. See `config.yaml.example`.
+YAML file; defaults are applied first, then overridden by the file. `config.yaml.example` documents every option with the strict defaults; **`config.dev.yaml.example`** is a ready-made development profile (run/stop/exec/delete containers, manage networks and volumes, pull images — only on resources created through the proxy).
 
 | Key | Default | Notes |
 |-----|---------|-------|
@@ -44,6 +44,9 @@ YAML file; defaults are applied first, then overridden by the file. See `config.
 | `logging.log_allowed` | `true` | Log allowed requests |
 | `logging.log_denied` | `true` | Log denied requests |
 | `logging.log_opa` | `true` | Route Rego `print()` output to the log |
+| `isolation.enabled` | `false` | Label-based resource isolation, see "Isolation". The `-i` flag enables it too. |
+| `isolation.name` | CWD hash | Label value. Keep stable across restarts. |
+| `isolation.mode` | `full` | `full` (private-daemon view) or `writes` |
 | `policy` | read-only, hardened | Policy options passed to Rego as `data.config`, see "Policy config" |
 
 Validation: at least one of `listen.socket`/`listen.address`, non-empty `docker_socket` and `policies_path`, valid level/format. There is no authentication of its own — access control is the socket permissions plus your policies.
@@ -87,7 +90,7 @@ Denials can't be overridden by any permissive rule; they are relaxed only throug
 | `00_config.rego` | Config defaults (`default_config`), merge with `data.config`, validation (`config_errors`). |
 | `01_framework.rego` | `allow` / `reason`. Don't remove. The only place that defines `allow`. |
 | `02_container_security.rego` | Hardening for `/containers/create`: privileged, host network/PID/IPC/userns, host devices, unconfined seccomp/AppArmor/SELinux, dangerous `CapAdd` (case and `CAP_` prefix normalized), bind mounts outside allowed prefixes (`Binds` and `Mounts`), volume mounts with driver options (bind bypass), unknown mount types, non-JSON body. |
-| `03_operations.rego` | The operation allowlist: read-only default plus write groups. |
+| `03_operations.rego` | The operation allowlist: read-only default plus write groups. With full isolation only reads of isolatable objects are visible (no `/system/df`, `/swarm`, …). |
 | `06_internal_network.rego` | Deny clients outside `allowed_client_cidrs` (Unix-socket clients exempt). |
 | `90_policy_test.rego` | `opa test` unit tests. |
 
@@ -103,7 +106,7 @@ policy:
   allowed_client_cidrs: ["10.0.0.0/8"]                               # default: loopback + RFC1918
 ```
 
-Every key defaults to the strictest value. Unknown keys, unknown `allow` tokens and malformed values make the proxy **refuse to start** (and deny everything if it somehow ran). Denial messages tell you which token or option would relax the rule.
+Every key defaults to the strictest value. Write groups: `containers_create`, `containers_control`, `containers_delete`, `exec`, `build`, `images_pull` (pull only), `images_write` (push/tag/load/commit/prune/delete), `volumes_write`, `networks_write`, `secrets_configs_read`. Unknown keys, unknown `allow` tokens and malformed values make the proxy **refuse to start** (and deny everything if it somehow ran). Denial messages tell you which token or option would relax the rule.
 
 Notes:
 - `policies_extra/deny_admin.rego` is **not loaded** by default; it is an optional stricter rule set (denies container lifecycle ops, container creation, all DELETEs). Copy it into the policies directory to enable it. With the read-only default it is mostly redundant.
@@ -111,17 +114,26 @@ Notes:
 - Every `*.rego` file in `policies_path` is loaded, including `*_test.rego`.
 - Bind-mount checks are textual: symlinks inside an allowed prefix are not resolved. Only allow prefixes you control.
 - Policies and config are read once at startup — restart to apply changes.
+- Keep the installed policy files in sync with the binary. The proxy refuses to start if a `policy:` config is given but the policies don't understand it (outdated policy set).
 - Test policies: `opa test policies/ -v` (requires the OPA CLI).
 
-## Isolation (`isolation/`, `-i` / `--isolation-name`)
+## Isolation (`isolation/`)
 
-Self-contained optional feature so several users/projects can share one Docker daemon without seeing each other's resources. When enabled, label `io.opa-docker-proxy.isolation=<name>` is:
+Optional, so several users/projects can share one Docker daemon. Enable with `isolation.enabled: true` (config) or `-i` / `--isolation-name`. Resources created through the proxy get the label `io.opa-docker-proxy.isolation=<name>` (injected into create bodies, build labels, and — for volumes created implicitly through `HostConfig.Mounts` — the volume options; any client-supplied value of that label is overwritten). Use a **stable** `isolation.name`: resources labelled with another name are invisible/untouchable.
 
-- **injected** into bodies of create requests and build `labels`;
-- **filtered** into list queries (`filters`) and prune calls;
-- **checked** on per-resource requests (containers, images, volumes, networks; execs resolve to their parent container) by inspecting the resource via the daemon — a mismatch returns 403.
+| Mode | Behaviour |
+|------|-----------|
+| `full` (default) | The client sees a private daemon. Container/volume/network lists and `/events` are filtered by label; every per-resource request — reads included — is checked by inspecting the resource, a mismatch is 403. `exec` into a container requires owning it. Daemon-wide endpoints that can't be filtered (`/system/df`, `/swarm`, …) are hidden by the policies. |
+| `writes` | Reads are unrestricted; only requests that change something (and websocket attach) are checked. Prune is scoped by label in both modes. |
 
-To remove the feature: delete `isolation/`, the flag handling in `main.go`, and the few calls in `proxy.go`.
+In both modes, container creation can't *reference* resources outside the isolation context: `VolumesFrom`, `container:<id>` network/PID/IPC modes, `Links`, networks (`NetworkMode`, `EndpointsConfig`) and named volumes (`Binds`, volume `Mounts`) are checked; names that don't exist yet are left to the daemon. `networks/{id}/connect|disconnect` also checks the named container. Built-in networks (`bridge`, `none`, …) are always usable.
+
+Limitations:
+- **Images are shared.** A pulled image carries no label, so images are neither filtered nor checked (`images_write` — push/delete — is therefore not scoped; the proxy warns if you enable it). Images built through the proxy are labelled.
+- A named volume that doesn't exist and is created implicitly through `Binds` (`"newvol:/data"`) is created *without* the label. Create volumes explicitly (`volumes_write`) or use `Mounts` of type `volume`, which are labelled.
+- Starting the proxy with change-capable `policy.allow` tokens (`containers_control`, `containers_delete`, `exec`, `volumes_write`, `networks_write`) **without** isolation logs a warning: clients could then change objects they didn't create.
+
+To remove the feature: delete `isolation/`, the isolation handling in `main.go`, and the few calls in `proxy.go`.
 
 ## Layout
 

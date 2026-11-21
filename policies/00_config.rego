@@ -40,6 +40,7 @@ allow_tokens := {
 	"containers_delete",
 	"exec",
 	"build",
+	"images_pull",
 	"images_write",
 	"volumes_write",
 	"networks_write",
@@ -52,6 +53,12 @@ allow_tokens := {
 	"devices",
 	"unconfined_security",
 }
+
+# Runtime facts supplied by the proxy (not user-configurable):
+#   data.runtime.isolation.mode is "off", "full" or "writes".
+default isolation_mode := "off"
+
+isolation_mode := data.runtime.isolation.mode
 
 default user_config := {}
 

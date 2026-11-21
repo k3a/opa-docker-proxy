@@ -30,7 +30,10 @@ type Engine struct {
 // policyConfig is exposed to the policies as data.config. The policies
 // validate it and report problems in data.policies.config_errors; a non-empty
 // set makes NewEngine fail.
-func NewEngine(polDir string, allowOPAPrint bool, policyConfig map[string]any) (*Engine, error) {
+//
+// runtime is exposed as data.runtime: facts determined by the proxy itself
+// (e.g. the isolation mode) that policies may depend on but users can not set.
+func NewEngine(polDir string, allowOPAPrint bool, policyConfig, runtime map[string]any) (*Engine, error) {
 	regoFiles, err := findRegoFiles(polDir)
 	if err != nil {
 		return nil, fmt.Errorf("find rego files in %s: %w", polDir, err)
@@ -59,12 +62,12 @@ func NewEngine(polDir string, allowOPAPrint bool, policyConfig map[string]any) (
 		return nil, fmt.Errorf("compile rego modules: %w", err)
 	}
 
-	store, err := newConfigStore(policyConfig)
+	store, err := newStore(policyConfig, runtime)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := checkConfig(compiler, store); err != nil {
+	if err := checkConfig(compiler, store, len(policyConfig) > 0); err != nil {
 		return nil, err
 	}
 
@@ -88,29 +91,37 @@ func NewEngine(polDir string, allowOPAPrint bool, policyConfig map[string]any) (
 	}, nil
 }
 
-// newConfigStore builds a store holding the policy config as data.config.
-func newConfigStore(policyConfig map[string]any) (storage.Store, error) {
+// newStore builds a store holding data.config and data.runtime.
+func newStore(policyConfig, runtime map[string]any) (storage.Store, error) {
 	if policyConfig == nil {
 		policyConfig = map[string]any{}
 	}
 
+	if runtime == nil {
+		runtime = map[string]any{}
+	}
+
 	// Round-trip through JSON so that YAML-decoded values (e.g. int) become
 	// plain JSON types the store accepts.
-	raw, err := json.Marshal(policyConfig)
+	raw, err := json.Marshal(map[string]any{"config": policyConfig, "runtime": runtime})
 	if err != nil {
-		return nil, fmt.Errorf("encode policy config: %w", err)
+		return nil, fmt.Errorf("encode policy data: %w", err)
 	}
 
 	var normalized map[string]any
 	if err := json.Unmarshal(raw, &normalized); err != nil {
-		return nil, fmt.Errorf("decode policy config: %w", err)
+		return nil, fmt.Errorf("decode policy data: %w", err)
 	}
 
-	return inmem.NewFromObject(map[string]any{"config": normalized}), nil
+	return inmem.NewFromObject(normalized), nil
 }
 
 // checkConfig fails when the policies report errors for the given config.
-func checkConfig(compiler *ast.Compiler, store storage.Store) error {
+//
+// If config is non-empty but the policies do not define config_errors at all
+// (e.g. an outdated policy set), the config would be silently ignored, so
+// that is an error too.
+func checkConfig(compiler *ast.Compiler, store storage.Store, haveConfig bool) error {
 	ctx := context.Background()
 
 	q, err := rego.New(
@@ -125,6 +136,11 @@ func checkConfig(compiler *ast.Compiler, store storage.Store) error {
 	rs, err := q.Eval(ctx)
 	if err != nil {
 		return fmt.Errorf("validate policy config: %w", err)
+	}
+
+	if len(rs) == 0 && haveConfig {
+		return fmt.Errorf("policy config given, but the loaded policies do not support it " +
+			"(data.policies.config_errors is undefined) — are the policy files outdated?")
 	}
 
 	var msgs []string

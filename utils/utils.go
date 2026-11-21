@@ -1,7 +1,13 @@
 // Package utils provides utility functions for URL path processing.
 package utils
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// versionSegment matches an API version path segment such as v1.44.
+var versionSegment = regexp.MustCompile(`^v[0-9]+(\.[0-9]+)*$`)
 
 // ---------------------------------------------------------------------------
 // URL path helpers – determine what kind of Docker API endpoint we are
@@ -16,7 +22,7 @@ func SplitVersionPath(path string) (string, string) {
 		return "", path
 	}
 
-	if len(parts[0]) > 0 && parts[0][0] == 'v' {
+	if versionSegment.MatchString(parts[0]) {
 		return parts[0], "/" + parts[1]
 	}
 

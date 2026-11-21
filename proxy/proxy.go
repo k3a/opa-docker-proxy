@@ -308,7 +308,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.Isolation != nil {
 		p.Isolation.TransformRequest(r)
 
-		if err := p.Isolation.CheckAccess(ctx, p.dockerClient, r.URL.Path); err != nil {
+		if err := p.Isolation.CheckAccess(ctx, p.dockerClient, r); err != nil {
 			slog.Warn("isolation check failed", "error", err, "path", r.URL.Path)
 			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusForbidden, r.UserAgent(), err.Error(), connID)
 

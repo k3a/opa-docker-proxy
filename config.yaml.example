@@ -30,6 +30,16 @@ logging:
   # Whether to route Rego print() output to the log
   log_opa: true
 
+# Resource isolation (optional; also enabled by the -i / --isolation-name flags).
+# Resources created through the proxy get a label; changes (mode "writes") or
+# all access (mode "full", a private-daemon view) are limited to labelled
+# resources. Strongly recommended whenever container/volume/network change
+# operations are enabled below. See config.dev.yaml.example.
+# isolation:
+#   enabled: true
+#   name: dev          # stable label value; default: hash of the working directory
+#   mode: full         # full | writes
+
 # Policy settings, passed to the Rego policies (see policies/00_config.rego).
 #
 # By default the proxy is READ-ONLY and blocks everything dangerous. Uncomment
@@ -43,7 +53,8 @@ policy:
   #   containers_delete    DELETE /containers/{id}, prune
   #   exec                 create/start exec instances
   #   build                image build (/build, /session, /grpc)
-  #   images_write         pull/push/tag/load/commit/delete images
+  #   images_pull          pull images (POST /images/create)
+  #   images_write         push/tag/load/commit/prune/delete images
   #   volumes_write        create/delete volumes
   #   networks_write       create/delete/connect networks
   #   secrets_configs_read GET /secrets, /configs, /swarm/unlockkey

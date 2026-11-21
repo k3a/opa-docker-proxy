@@ -31,7 +31,11 @@ operation_groups := {
 		{"methods": {"POST"}, "path": `^/exec/[^/]+/(start|resize)$`},
 	],
 	"build": [{"methods": {"POST"}, "path": `^/(build|build/prune|session|grpc)$`}],
-	"images_write": [{"methods": write_methods, "path": `^/(images/.+|commit)$`}],
+	"images_pull": [{"methods": {"POST"}, "path": `^/images/create$`}],
+	"images_write": [
+		{"methods": {"POST"}, "path": `^/(commit|images/load|images/prune|images/.+/(tag|push))$`},
+		{"methods": {"DELETE"}, "path": `^/images/.+$`},
+	],
 	"volumes_write": [{"methods": write_methods, "path": `^/volumes(/.*)?$`}],
 	"networks_write": [{"methods": write_methods, "path": `^/networks(/.*)?$`}],
 }
@@ -46,10 +50,23 @@ sensitive_read if input.path == "/swarm/unlockkey"
 # Websocket attach is a GET but can send input to the container.
 attach_ws if regex.match(`^/containers/[^/]+/attach/ws$`, input.path)
 
+# With full isolation the client must see a private daemon, so only reads of
+# isolatable objects (which the proxy filters/checks by label) are visible.
+# Everything else that would leak daemon-wide state (/system/df, /swarm, ...)
+# is hidden.
+isolated_read_path if regex.match(`^/(_ping|version|info|events)$`, input.path)
+
+isolated_read_path if regex.match(`^/(containers|images|networks|volumes|exec)(/.*)?$`, input.path)
+
+reads_visible if isolation_mode != "full"
+
+reads_visible if isolated_read_path
+
 read_only_request if {
 	input.method in read_methods
 	not sensitive_read
 	not attach_ws
+	reads_visible
 }
 
 request_permitted if read_only_request
@@ -91,4 +108,9 @@ enable_hint := sprintf(" (enable with policy.allow: %s)", [concat(", ", sort(hin
 
 default enable_hint := ""
 
-not_permitted_message := sprintf("%s %s is not permitted: only read-only requests are allowed by default%s", [input.method, input.path, enable_hint])
+not_permitted_message := sprintf("%s %s is not available in isolated mode", [input.method, input.path]) if {
+	input.method in read_methods
+	not sensitive_read
+	not attach_ws
+	not reads_visible
+} else := sprintf("%s %s is not permitted: only read-only requests are allowed by default%s", [input.method, input.path, enable_hint])

@@ -44,26 +44,45 @@ func main() {
 	logger.Setup(cfg.Logging.Level, cfg.Logging.Format, os.Stdout)
 	slog.Info("starting opa-docker-proxy", "config_file", args.Config)
 
+	// Optional isolation context (config file, or -i / --isolation-name).
+	var iso *isolation.Isolation
+	if isolationOn || cfg.Isolation.Enabled {
+		name := cfg.Isolation.Name
+		if args.IsolationName != "" {
+			name = args.IsolationName
+		}
+
+		iso, err = isolation.New(name, isolation.Mode(cfg.Isolation.Mode))
+		if err != nil {
+			slog.Error("failed to create isolation context", "error", err)
+			os.Exit(1)
+		}
+
+		slog.Info("isolation enabled", "name", iso.Name, "mode", iso.Mode)
+	}
+
+	if tokens := cfg.UnscopedWriteTokens(iso != nil); len(tokens) > 0 {
+		slog.Warn("policy.allow lets clients change objects they did not create; "+
+			"enable isolation to restrict this to resources created through the proxy "+
+			"(images are never isolated)", "tokens", tokens)
+	}
+
+	// Facts for the policies that users can not configure.
+	isolationMode := "off"
+	if iso != nil {
+		isolationMode = string(iso.Mode)
+	}
+
+	runtime := map[string]any{"isolation": map[string]any{"mode": isolationMode}}
+
 	// Load OPA policies.
-	opaEngine, err := opa.NewEngine(cfg.PoliciesPath, cfg.Logging.LogOPA, cfg.Policy)
+	opaEngine, err := opa.NewEngine(cfg.PoliciesPath, cfg.Logging.LogOPA, cfg.Policy, runtime)
 	if err != nil {
 		slog.Error("failed to load OPA policies", "error", err)
 		os.Exit(1)
 	}
 
 	slog.Info("OPA policies loaded", "policies_path", cfg.PoliciesPath)
-
-	// Optional isolation context.
-	var iso *isolation.Isolation
-	if isolationOn {
-		iso, err = isolation.New(args.IsolationName)
-		if err != nil {
-			slog.Error("failed to create isolation context", "error", err)
-			os.Exit(1)
-		}
-
-		slog.Info("isolation enabled", "name", iso.Name)
-	}
 
 	// Create the proxy.
 	p, err := proxy.New(cfg, opaEngine, iso)

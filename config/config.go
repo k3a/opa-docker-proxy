@@ -24,12 +24,26 @@ type ListenConfig struct {
 	Address string `json:"address" yaml:"address"`
 }
 
+// IsolationConfig configures resource isolation (see package isolation).
+// The -i / --isolation-name flags enable it too and override Name.
+type IsolationConfig struct {
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Name is the label value identifying "this" proxy's resources. Keep it
+	// stable: resources created under another name are invisible/untouchable.
+	// Defaults to a hash of the working directory.
+	Name string `json:"name" yaml:"name"`
+	// Mode is "full" (default; private-daemon view) or "writes" (reads open,
+	// only changes are restricted to own resources).
+	Mode string `json:"mode" yaml:"mode"`
+}
+
 // Config is the top-level configuration.
 type Config struct {
-	Listen       ListenConfig  `json:"listen"        yaml:"listen"`
-	DockerSocket string        `json:"docker_socket" yaml:"docker_socket"`
-	PoliciesPath string        `json:"policies_path" yaml:"policies_path"`
-	Logging      LoggingConfig `json:"logging"       yaml:"logging"`
+	Listen       ListenConfig    `json:"listen"        yaml:"listen"`
+	DockerSocket string          `json:"docker_socket" yaml:"docker_socket"`
+	PoliciesPath string          `json:"policies_path" yaml:"policies_path"`
+	Logging      LoggingConfig   `json:"logging"       yaml:"logging"`
+	Isolation    IsolationConfig `json:"isolation"   yaml:"isolation"`
 	// Policy is passed to the Rego policies as data.config. Its schema and
 	// validation live in policies/00_config.rego.
 	Policy map[string]any `json:"policy" yaml:"policy"`
@@ -77,6 +91,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("logging.level must be one of: debug, info, warn, error")
 	}
 
+	if m := c.Isolation.Mode; m != "" && m != "full" && m != "writes" {
+		return fmt.Errorf("isolation.mode must be one of: full, writes")
+	}
+
 	validFormats := map[string]bool{"text": true, "json": true}
 	if !validFormats[c.Logging.Format] {
 		return fmt.Errorf("logging.format must be one of: text, json")
@@ -115,4 +133,37 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	return cfg, cfg.Validate()
+}
+
+// unscopedAlways are policy.allow tokens that change objects the isolation
+// can not attribute to a client (images carry no ownership label).
+var unscopedAlways = map[string]bool{"images_write": true}
+
+// unscopedWithoutIsolation are policy.allow tokens that change existing
+// objects, which is only scoped to the client's own when isolation is on.
+var unscopedWithoutIsolation = map[string]bool{
+	"containers_control": true,
+	"containers_delete":  true,
+	"exec":               true,
+	"volumes_write":      true,
+	"networks_write":     true,
+}
+
+// UnscopedWriteTokens returns the policy.allow entries that let clients
+// change objects they did not create. Without isolation that is every enabled
+// write token that touches existing objects; with isolation only the ones
+// isolation can not cover.
+func (c Config) UnscopedWriteTokens(isolated bool) []string {
+	list, _ := c.Policy["allow"].([]any)
+
+	var out []string
+
+	for _, v := range list {
+		t, _ := v.(string)
+		if unscopedAlways[t] || (!isolated && unscopedWithoutIsolation[t]) {
+			out = append(out, t)
+		}
+	}
+
+	return out
 }

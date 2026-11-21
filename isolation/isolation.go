@@ -1,10 +1,21 @@
 // Package isolation implements an optional isolation feature.
 //
 // When enabled, every resource created through the proxy (containers, volumes,
-// networks, images built) gets a unique label injected.  List operations are
-// transparently filtered to show only resources bearing that label, and
-// operations on individual resources are checked for the label before being
-// forwarded to the Docker daemon.
+// networks, images built) gets a unique label injected.  Operations on
+// individual resources are checked for the label before being forwarded to
+// the Docker daemon, and create requests may not reference (mount, join,
+// attach to) resources that lack it.
+//
+// Two modes control what is isolated:
+//
+//   - ModeFull (default): the client sees a private daemon. List operations
+//     and events are filtered by label and every per-resource request,
+//     reads included, is checked.
+//   - ModeWrites: reads are untouched; only requests that change something
+//     are checked (and prune is scoped by label).
+//
+// Images are shared in both modes: pulled images carry no label, so they
+// can not be attributed to a client.
 //
 // The entire package is self-contained and can be removed by deleting the
 // isolation/ directory, removing the flag handling in main.go, and removing
@@ -23,6 +34,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/k3a/opa-docker-proxy/utils"
@@ -65,12 +77,32 @@ func (rt ResourceType) String() string {
 // belonging to this isolation context.
 type Isolation struct {
 	Name string
+	Mode Mode
 }
+
+// Mode selects how much of the Docker API is isolated.
+type Mode string
+
+// Isolation modes.
+const (
+	// ModeFull isolates reads and writes: the client sees a private daemon.
+	ModeFull Mode = "full"
+	// ModeWrites checks only requests that change something.
+	ModeWrites Mode = "writes"
+)
 
 // New creates a new Isolation.
 // If name is empty the name is derived from a SHA-256 hash of the current
-// working directory (first 16 hex characters).
-func New(name string) (*Isolation, error) {
+// working directory (first 16 hex characters). An empty mode means ModeFull.
+func New(name string, mode Mode) (*Isolation, error) {
+	switch mode {
+	case "":
+		mode = ModeFull
+	case ModeFull, ModeWrites:
+	default:
+		return nil, fmt.Errorf("unknown isolation mode %q (valid: full, writes)", mode)
+	}
+
 	if name == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -81,7 +113,7 @@ func New(name string) (*Isolation, error) {
 		name = fmt.Sprintf("%x", h[:8])
 	}
 
-	return &Isolation{Name: name}, nil
+	return &Isolation{Name: name, Mode: mode}, nil
 }
 
 // labelFilterValue returns the value that should appear inside a Docker
@@ -126,7 +158,6 @@ func resourceTypeAndID(path string) (ResourceType, string, bool) {
 
 	patterns := []entry{
 		{"/containers/", ResourceContainer},
-		{"/images/", ResourceImage},
 		{"/volumes/", ResourceVolume},
 		{"/networks/", ResourceNetwork},
 		{"/exec/", ResourceExec},
@@ -165,9 +196,9 @@ func isCollectionListPath(path string) bool {
 	// Exact match for list endpoints
 	listEndpoints := map[string]bool{
 		"/containers/json": true,
-		"/images/json":     true,
 		"/volumes":         true,
 		"/networks":        true,
+		"/events":          true,
 	}
 	if listEndpoints[cleaned] {
 		return true
@@ -219,6 +250,23 @@ func isPrunePath(path string) bool {
 // Public API methods
 // ---------------------------------------------------------------------------
 
+var attachWSPath = regexp.MustCompile(`^/containers/[^/]+/attach/ws$`)
+
+// isWriteRequest reports whether a request can change state. Websocket attach
+// is a GET but can send input to the container, so it counts as a write.
+func isWriteRequest(method, path string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return true
+	}
+
+	return attachWSPath.MatchString(utils.StripVersionPrefix(path))
+}
+
+// skip reports whether the request is outside this mode's scope.
+func (i *Isolation) skip(r *http.Request) bool {
+	return i.Mode == ModeWrites && !isWriteRequest(r.Method, r.URL.Path)
+}
+
 // TransformRequest mutates the HTTP request to enforce isolation.
 // It should be called after the OPA policy has allowed the request, just
 // before forwarding to the Docker daemon.
@@ -231,7 +279,7 @@ func isPrunePath(path string) bool {
 //   - For prune endpoints: injects a label filter to avoid deleting resources
 //     from other isolation contexts.
 func (i *Isolation) TransformRequest(r *http.Request) {
-	if r == nil {
+	if r == nil || i.skip(r) {
 		return
 	}
 
@@ -264,14 +312,32 @@ func (i *Isolation) TransformRequest(r *http.Request) {
 	}
 }
 
-// CheckAccess verifies that a resource targeted by the request belongs to
-// this isolation context.  It makes an additional API call to the Docker
-// daemon to inspect the resource.
+// CheckAccess verifies that the resources a request touches belong to this
+// isolation context.  It makes additional API calls to the Docker daemon to
+// inspect them.
 //
-// For exec instances, it resolves the parent container first.
+//   - The resource addressed by the path (exec instances resolve to their
+//     parent container).
+//   - For network connect/disconnect: the container named in the body.
+//   - For container creation: every container, network and volume the body
+//     references (VolumesFrom, "container:" modes, Links, networks, named
+//     volumes). Names that do not exist yet are left to the daemon.
 //
 // Returns nil when access is granted, or an error describing why it was denied.
-func (i *Isolation) CheckAccess(ctx context.Context, dockerClient *http.Client, path string) error {
+func (i *Isolation) CheckAccess(ctx context.Context, dockerClient *http.Client, r *http.Request) error {
+	if i.skip(r) {
+		return nil
+	}
+
+	if err := i.checkTarget(ctx, dockerClient, r.URL.Path); err != nil {
+		return err
+	}
+
+	return i.checkReferences(ctx, dockerClient, r)
+}
+
+// checkTarget checks the resource addressed by the request path.
+func (i *Isolation) checkTarget(ctx context.Context, dockerClient *http.Client, path string) error {
 	rt, id, ok := resourceTypeAndID(path)
 	if !ok {
 		return nil // not a resource-specific endpoint
@@ -293,11 +359,66 @@ func (i *Isolation) CheckAccess(ctx context.Context, dockerClient *http.Client, 
 	return nil
 }
 
+var networkMembershipPath = regexp.MustCompile(`^/networks/[^/]+/(connect|disconnect)$`)
+
+// checkReferences checks resources referenced from the request body.
+func (i *Isolation) checkReferences(ctx context.Context, client *http.Client, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return nil
+	}
+
+	cleaned := utils.StripVersionPrefix(r.URL.Path)
+
+	var extract func(map[string]any) []reference
+
+	switch {
+	case cleaned == "/containers/create":
+		extract = createReferences
+	case networkMembershipPath.MatchString(cleaned):
+		extract = membershipReferences
+	default:
+		return nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if errc := r.Body.Close(); errc != nil {
+		slog.Warn("failed to close request body", "error", errc)
+	}
+
+	if err != nil {
+		return fmt.Errorf("read request body: %w", err)
+	}
+
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil // not a JSON object; the policy layer decides
+	}
+
+	for _, ref := range extract(data) {
+		st, err := i.ownership(ctx, client, ref.typ, ref.id)
+		if err != nil {
+			return fmt.Errorf("isolation check for %v %s: %w", ref.typ, ref.id, err)
+		}
+
+		if st == foreign {
+			return fmt.Errorf("access denied: referenced %v %q is not part of this isolation context", ref.typ, ref.id)
+		}
+	}
+
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
 // injectBodyLabels adds the isolation label to a JSON request body.
+// Docker matches JSON keys case-insensitively, so differently-cased variants
+// of "Labels" are merged first; otherwise one could override the injected
+// label. Volumes implicitly created through HostConfig.Mounts are labelled
+// too.
 func (i *Isolation) injectBodyLabels(body []byte) []byte {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
@@ -309,13 +430,16 @@ func (i *Isolation) injectBodyLabels(body []byte) []byte {
 		return body // not JSON – leave unchanged
 	}
 
-	labels, _ := data["Labels"].(map[string]any)
-	if labels == nil {
-		labels = make(map[string]any)
-		data["Labels"] = labels
-	}
+	i.setLabel(data, "Labels")
 
-	labels[LabelKey] = i.Name
+	for _, hc := range objects(lookup(data, "HostConfig")) {
+		for _, mount := range objects(lookup(hc, "Mounts")) {
+			if strings.EqualFold(fmt.Sprint(first(lookup(mount, "Type"))), "volume") {
+				vo := mergeObjects(mount, "VolumeOptions")
+				i.setLabel(vo, "Labels")
+			}
+		}
+	}
 
 	modified, err := json.Marshal(data)
 	if err != nil {
@@ -323,6 +447,41 @@ func (i *Isolation) injectBodyLabels(body []byte) []byte {
 	}
 
 	return modified
+}
+
+func first(vs []any) any {
+	if len(vs) == 0 {
+		return nil
+	}
+
+	return vs[0]
+}
+
+// mergeObjects collapses all case variants of key in m into one object stored
+// under key, creating it when absent, and returns it.
+func mergeObjects(m map[string]any, key string) map[string]any {
+	merged := make(map[string]any)
+
+	for k, v := range m {
+		if !strings.EqualFold(k, key) {
+			continue
+		}
+
+		if obj, ok := v.(map[string]any); ok {
+			maps.Copy(merged, obj)
+		}
+
+		delete(m, k)
+	}
+
+	m[key] = merged
+
+	return merged
+}
+
+// setLabel sets the isolation label in the Labels-like object under key.
+func (i *Isolation) setLabel(m map[string]any, key string) {
+	mergeObjects(m, key)[LabelKey] = i.Name
 }
 
 // injectFilters adds a label filter to the "filters" query parameter.
@@ -377,33 +536,61 @@ func (i *Isolation) injectBuildLabels(u *url.URL) {
 	u.RawQuery = q.Encode()
 }
 
+type ownershipState int
+
+const (
+	owned ownershipState = iota
+	foreign
+	notFound
+)
+
 // checkResource inspects a Docker resource and verifies it carries the
-// isolation label.
+// isolation label. A missing resource is reported as not accessible.
 func (i *Isolation) checkResource(ctx context.Context, client *http.Client, rt ResourceType, id string) (bool, string, error) {
-	var inspectPath string
-
-	switch rt {
-	case ResourceContainer:
-		inspectPath = "/containers/" + id + "/json"
-	case ResourceImage:
-		inspectPath = "/images/" + id + "/json"
-	case ResourceVolume:
-		inspectPath = "/volumes/" + id
-	case ResourceNetwork:
-		inspectPath = "/networks/" + id
-	default:
-		return false, "", fmt.Errorf("unsupported resource type %v", rt)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+inspectPath, nil)
-
+	st, err := i.ownership(ctx, client, rt, id)
 	if err != nil {
 		return false, "", err
 	}
 
+	switch st {
+	case owned:
+		return true, "", nil
+	case notFound:
+		return false, "resource not found", nil
+	default:
+		return false, fmt.Sprintf("resource lacks isolation label %s=%s", LabelKey, i.Name), nil
+	}
+}
+
+// ownership inspects a resource and classifies it.
+func (i *Isolation) ownership(ctx context.Context, client *http.Client, rt ResourceType, id string) (ownershipState, error) {
+	// id may come from a request body: escape it so it can not alter the
+	// inspected path.
+	eid := url.PathEscape(id)
+
+	var inspectPath string
+
+	switch rt {
+	case ResourceContainer:
+		inspectPath = "/containers/" + eid + "/json"
+	case ResourceImage:
+		inspectPath = "/images/" + eid + "/json"
+	case ResourceVolume:
+		inspectPath = "/volumes/" + eid
+	case ResourceNetwork:
+		inspectPath = "/networks/" + eid
+	default:
+		return foreign, fmt.Errorf("unsupported resource type %v", rt)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+inspectPath, nil)
+	if err != nil {
+		return foreign, err
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, "", fmt.Errorf("inspect %s: %w", inspectPath, err)
+		return foreign, fmt.Errorf("inspect %s: %w", inspectPath, err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -413,21 +600,21 @@ func (i *Isolation) checkResource(ctx context.Context, client *http.Client, rt R
 
 	switch resp.StatusCode {
 	case http.StatusNotFound:
-		return false, "resource not found", nil
+		return notFound, nil
 	case http.StatusOK:
 		// proceed
 	default:
-		return false, "", fmt.Errorf("inspect %s returned HTTP %d", inspectPath, resp.StatusCode)
+		return foreign, fmt.Errorf("inspect %s returned HTTP %d", inspectPath, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, "", fmt.Errorf("read inspect body: %w", err)
+		return foreign, fmt.Errorf("read inspect body: %w", err)
 	}
 
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
-		return false, "", fmt.Errorf("parse inspect response: %w", err)
+		return foreign, fmt.Errorf("parse inspect response: %w", err)
 	}
 
 	// Docker resources store labels in different places:
@@ -442,22 +629,17 @@ func (i *Isolation) checkResource(ctx context.Context, client *http.Client, rt R
 		labels = l
 	}
 
-	if labels == nil {
-		return false, fmt.Sprintf("resource lacks isolation label %s=%s", LabelKey, i.Name), nil
+	if val, ok := labels[LabelKey]; !ok || fmt.Sprint(val) != i.Name {
+		return foreign, nil
 	}
 
-	val, ok := labels[LabelKey]
-	if !ok || fmt.Sprint(val) != i.Name {
-		return false, fmt.Sprintf("resource lacks isolation label %s=%s", LabelKey, i.Name), nil
-	}
-
-	return true, "", nil
+	return owned, nil
 }
 
 // checkExecContainer inspects an exec instance to find its parent container,
 // then checks that container for the isolation label.
 func (i *Isolation) checkExecContainer(ctx context.Context, client *http.Client, execID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/exec/"+execID+"/json", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/exec/"+url.PathEscape(execID)+"/json", nil)
 
 	if err != nil {
 		return err
@@ -511,5 +693,5 @@ func (i *Isolation) checkExecContainer(ctx context.Context, client *http.Client,
 
 // String returns a human-readable description of the isolation context.
 func (i *Isolation) String() string {
-	return fmt.Sprintf("isolation=%s", i.Name)
+	return fmt.Sprintf("isolation=%s mode=%s", i.Name, i.Mode)
 }
