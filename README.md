@@ -2,6 +2,10 @@
 
 A policy-enforcing proxy for the Docker Engine API. It listens on its own Unix socket (or TCP address), evaluates every request against [OPA](https://www.openpolicyagent.org/) Rego policies, and only forwards allowed requests to the real Docker socket. Optionally it can also **isolate** clients from each other's resources via injected labels.
 
+The main use-case is to allow running docker commands in a sandbox with restricted permissions.
+Please note that only automated AI-asisted testing was used and I can't guarantee that there is absolutely
+no way to bypass the policy checks or escape the isolation. Tests and pull requests are welcome.
+
 ```
 docker client ──► opa-docker-proxy ──(allowed)──► /var/run/docker.sock
                     │  Rego policies decide
@@ -20,6 +24,39 @@ mkdir -p /etc/opa-docker-proxy && cp -r policies /etc/opa-docker-proxy/
 
 DOCKER_HOST=unix:///var/run/opa-docker-proxy.sock docker ps
 ```
+
+## Drop sandbox + AI harness example
+
+Configure /etc/opa-docker-proxy/config.yaml, config.dev.yaml.example is recommended.
+
+Create a wrapper script to your favourite AI harness in a PATH like so:
+
+```sh
+#!/bin/sh
+
+# cleanup trap that ensures the script's entire process group (itself + all children/grandchildren)
+# is killed when the script receives SIGINT (Ctrl+C), SIGTERM, or exits normally
+trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+
+# ensure not at HOME!
+if [ "$PWD" = "$HOME" ]; then
+    mkdir -p /tmp/empty && cd /tmp/empty
+fi
+
+# run docker proxy
+DSOCK=$(opa-docker-proxy --print-socket)
+opa-docker-proxy -i & DPID=$!
+until [ -S "$DSOCK" ]; do sleep 0.1; done
+#export DOCKER_HOST=unix://$DSOCK
+
+# new drop env
+drop init &>/dev/null || true
+# cannot use exec due to docker proxy cleanup (see trap)
+drop run -m "$DSOCK:/var/run/docker.sock:rw" /usr/bin/claude "$@"
+
+```
+
+It will mount the proxied socket at /var/run/docker.sock inside the [Drop](https://github.com/wrr/drop) sandbox.
 
 ### CLI flags
 
@@ -129,7 +166,7 @@ Loaded as `data.config`; see `config.yaml.example` for all options and the full 
 ```yaml
 policy:
   allow: [containers_create, containers_control, containers_delete]  # enable write groups / exempt hardening rules
-  allowed_bind_prefixes: ["/dev/", "/tmp/agent/"]                   # bind mounts only below these (must start+end with "/")
+  allowed_bind_prefixes: ["/dev/", "/tmp/agent/"]                    # bind mounts only below these (must start+end with "/")
   allowed_capabilities: [NET_ADMIN]                                  # dangerous caps that may still be added
   allowed_images: ["alpine", "myregistry.local/*"]                   # images that may be pulled/run (default: any)
   allowed_client_cidrs: ["10.0.0.0/8"]                               # default: loopback + RFC1918
