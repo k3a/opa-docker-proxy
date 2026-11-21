@@ -24,6 +24,9 @@ type ListenConfig struct {
 	Address string `json:"address" yaml:"address"`
 }
 
+// DefaultSocket is the listen socket used when none is configured.
+const DefaultSocket = "/var/run/opa-docker-proxy.sock"
+
 // IsolationConfig configures resource isolation (see package isolation).
 // The -i / --isolation-name flags enable it too and override Name.
 type IsolationConfig struct {
@@ -58,7 +61,7 @@ func DefaultConfig() Config {
 
 	return Config{
 		Listen: ListenConfig{
-			Socket: "/var/run/opa-docker-proxy.sock",
+			Socket: DefaultSocket,
 		},
 		DockerSocket: dockerSocket,
 		PoliciesPath: "/etc/opa-docker-proxy/policies",

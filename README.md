@@ -28,6 +28,18 @@ DOCKER_HOST=unix:///var/run/opa-docker-proxy.sock docker ps
 | `-c <path>` | Config file. Without it, `/etc/opa-docker-proxy/config.yaml` is used if present, otherwise built-in defaults. An explicit path must exist. |
 | `-i` | Enable isolation (also settable in the config); name defaults to first 16 hex chars of SHA-256 of the CWD |
 | `--isolation-name <name>` | Explicit isolation name (implies `-i`, overrides `isolation.name`) |
+| `-s <path>` | Listen socket (overrides `listen.socket`) |
+| `--print-socket` | Print the resolved socket path and exit |
+
+With isolation on and no socket configured, the proxy listens on `$TMPDIR/opa-docker-proxy/<name>.sock` (name = isolation name, or the CWD hash; non-filename-safe names are hashed). In this mode logs go to `<name>.log` next to the socket (mode `0600`) instead of stdout; startup errors are also printed to stderr. Both files are removed on exit (SIGINT/SIGTERM exits 0); a SIGKILL leaves them behind. Script usage:
+
+```sh
+SOCK=$(opa-docker-proxy -i --print-socket)   # same path the daemon will use
+opa-docker-proxy -i & PID=$!
+until [ -S "$SOCK" ]; do sleep 0.1; done
+DOCKER_HOST=unix://$SOCK docker run --rm alpine true
+kill $PID; wait $PID
+```
 
 ## Configuration
 
