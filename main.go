@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"syscall"
 
 	"github.com/alexflint/go-arg"
@@ -26,13 +25,14 @@ import (
 
 // cliArgs describes the command-line interface.
 type cliArgs struct {
-	Config        string `arg:"-c"               help:"path to configuration file (default: /etc/opa-docker-proxy/config.yaml, optional)"`
-	Isolation     bool   `arg:"-i"               help:"enable isolation (name defaults to CWD hash; use --isolation-name to override)"`
-	IsolationName string `arg:"--isolation-name" help:"isolation name (implies -i)"`
-	Socket        string `arg:"-s,--socket"      help:"unix socket to listen on (overrides listen.socket); with isolation and no socket configured: $TMPDIR/opa-docker-proxy/<name>.sock"`
-	PrintSocket   bool   `arg:"--print-socket"   help:"print the resolved socket path to stdout and exit (for scripts)"`
+	Config        string `arg:"-c"               help:"configuration file (default: /etc/opa-docker-proxy/config.yaml if present, else built-in defaults)"`
+	Isolation     bool   `arg:"-i"               help:"isolate resources by label; name defaults to a hash of the current directory. Listens on a private temp socket and logs to a temp file"`
+	IsolationName string `arg:"--isolation-name" help:"use this isolation name instead of the directory hash (implies -i)"`
+	Socket        string `arg:"-s,--socket"      help:"unix socket to listen on; overrides listen.socket and the -i temp socket"`
+	PrintName     bool   `arg:"--print-name"     help:"print the isolation name and exit (for scripts)"`
+	PrintSocket   bool   `arg:"--print-socket"   help:"print the socket path that -i uses and exit (for scripts)"`
 
-	Clean *cleanCmd `arg:"subcommand:clean" help:"remove containers, networks, volumes and images labelled by isolation (current directory's by default)"`
+	Clean *cleanCmd `arg:"subcommand:clean" help:"remove containers, networks, volumes and images of an isolation (current directory's by default)"`
 }
 
 // cleanCmd removes isolated objects directly through the Docker socket.
@@ -41,7 +41,20 @@ type cleanCmd struct {
 }
 
 func (cliArgs) Description() string {
-	return "OPA-powered Docker access proxy with optional resource isolation."
+	return "OPA-powered Docker access proxy with optional resource isolation.\n" +
+		"Without a command, runs the proxy."
+}
+
+func (cliArgs) Epilogue() string {
+	return `With -i the socket is $TMPDIR/opa-docker-proxy/<name>.sock and logs go to
+<name>.log next to it; both are removed on exit.
+
+Examples:
+  opa-docker-proxy                          run with the configured socket
+  opa-docker-proxy -i &                     run isolated for the current directory
+  export DOCKER_HOST=unix://$(opa-docker-proxy --print-socket)
+  opa-docker-proxy clean                    remove this directory's isolated objects
+  opa-docker-proxy clean --all-isolated     remove every isolated object`
 }
 
 func main() {
@@ -58,20 +71,52 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Resolve the listen socket: -s wins; with isolation and the built-in
-	// default socket, use a private per-isolation path in the temp dir.
-	// Only then is a <name>.log file used instead of stdout.
+	if args.Clean != nil {
+		os.Exit(runClean(cfg, args))
+	}
+
+	isoName := cfg.Isolation.Name
+	if args.IsolationName != "" {
+		isoName = args.IsolationName
+	}
+
+	// Subcommands for scripts: print the resolved isolation name / socket.
+	if args.PrintName || args.PrintSocket {
+		iso, err := isolation.New(isoName, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if args.PrintName {
+			fmt.Println(iso.Name)
+			return
+		}
+
+		sock := args.Socket
+		if sock == "" {
+			if sock, err = isolatedSocketPath(isoName); err != nil {
+				fmt.Fprintf(os.Stderr, "error resolving socket path: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		fmt.Println(sock)
+
+		return
+	}
+
+	// Resolve the listen socket: -s wins. With -i / --isolation-name the
+	// socket is always a private per-isolation path in the temp dir (the
+	// config's listen.socket is ignored). With isolation enabled only via
+	// the config, that path is used when the built-in default socket is set.
+	// Whenever -i is given, logs go to <name>.log instead of stdout.
 	autoSocket := false
 
 	if args.Socket != "" {
 		cfg.Listen.Socket = args.Socket
-	} else if (isolationOn || cfg.Isolation.Enabled) && cfg.Listen.Socket == config.DefaultSocket {
-		name := cfg.Isolation.Name
-		if args.IsolationName != "" {
-			name = args.IsolationName
-		}
-
-		cfg.Listen.Socket, err = isolatedSocketPath(name)
+	} else if isolationOn || (cfg.Isolation.Enabled && cfg.Listen.Socket == config.DefaultSocket) {
+		cfg.Listen.Socket, err = isolatedSocketPath(isoName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error resolving socket path: %v\n", err)
 			os.Exit(1)
@@ -80,25 +125,22 @@ func main() {
 		autoSocket = true
 	}
 
-	if args.PrintSocket {
-		fmt.Println(cfg.Listen.Socket)
-		return
-	}
-
-	if args.Clean != nil {
-		os.Exit(runClean(cfg, args))
-	}
-
 	// Initialise structured logging.
-	// In auto-socket (isolation) mode, log to <name>.log next to the socket
-	// and remove it on exit.
+	// With -i (or an auto socket), log to <name>.log in the isolation temp
+	// directory and remove it on exit.
 	var (
 		logOut  io.Writer = os.Stdout
 		logPath string
 	)
 
-	if autoSocket {
-		logPath = strings.TrimSuffix(cfg.Listen.Socket, ".sock") + ".log"
+	if isolationOn || autoSocket {
+		logPath, err = isolatedBasePath(isoName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error resolving log path: %v\n", err)
+			os.Exit(1)
+		}
+
+		logPath += ".log"
 
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err != nil {
@@ -217,6 +259,16 @@ var safeName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // are not filename-safe are replaced by a hash. An empty name uses the same
 // CWD hash as the isolation default, so the path is predictable.
 func isolatedSocketPath(name string) (string, error) {
+	base, err := isolatedBasePath(name)
+	if err != nil {
+		return "", err
+	}
+
+	return base + ".sock", nil
+}
+
+// isolatedBasePath returns $TMPDIR/opa-docker-proxy/<name> without extension.
+func isolatedBasePath(name string) (string, error) {
 	if name == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -237,7 +289,7 @@ func isolatedSocketPath(name string) (string, error) {
 
 	_ = os.Chmod(dir, 0o1777) // MkdirAll is subject to umask; ignore if not owner
 
-	return filepath.Join(dir, name+".sock"), nil
+	return filepath.Join(dir, name), nil
 }
 
 // runClean implements the clean subcommand and returns the exit code.
