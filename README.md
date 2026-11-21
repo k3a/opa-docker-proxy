@@ -54,7 +54,7 @@ Validation: at least one of `listen.socket`/`listen.address`, non-empty `docker_
 ## Request flow (`proxy/proxy.go`)
 
 1. Read the body; determine client IP (`X-Forwarded-For` → `X-Real-Ip` → remote addr; Unix socket clients show up as `@`).
-2. Build OPA input (below). If `Content-Type` is `application/json` the body is validated and parsed (400 on invalid JSON); otherwise `body` stays a raw string.
+2. Build OPA input (below). If `Content-Type` is `application/json` the body is validated and parsed (400 on invalid JSON, duplicate keys, or non-canonical key spelling, see "Request body checks"); otherwise `body` stays a raw string. The query string is passed as `query` (`{"fromImage": ["alpine"]}`).
 3. Evaluate `data.policies.allow` and `data.policies.reason`. Deny → HTTP 403 with the reason; evaluation error → 500. No result = deny.
 4. If isolation is on: transform the request and check resource ownership (403 otherwise).
 5. Forward via `httputil.ReverseProxy` to the Docker socket (HTTP upgrades for attach/exec are handled natively).
@@ -66,6 +66,7 @@ Validation: at least one of `listen.socket`/`listen.address`, non-empty `docker_
   "method": "POST",
   "api_ver": "v1.44",
   "path": "/containers/create",
+  "query": { "fromImage": ["alpine"] },
   "body": { "...parsed JSON..." },
   "headers": { "Content-Type": "application/json" },
   "client_ip": "127.0.0.1"
@@ -73,6 +74,18 @@ Validation: at least one of `listen.socket`/`listen.address`, non-empty `docker_
 ```
 
 The version prefix is stripped from `path`, so policies match clean paths like `/containers/create`.
+
+## Request body checks (`bodycheck/`)
+
+The policies must see the same body the Docker daemon acts on. The daemon decodes JSON with Go's `encoding/json`, which matches keys **case-insensitively** (`{"hostconfig":{"privileged":true}}` sets `HostConfig.Privileged`) and **merges duplicate keys** (`{"HostConfig":{"Privileged":true},"HostConfig":{}}` is privileged). A rule reading `input.body.HostConfig.Privileged` would miss both, so such bodies are rejected with `400` instead of being interpreted:
+
+- **Duplicate keys** anywhere in a JSON body.
+- **Non-canonical key spelling** on `/containers/create` and network `connect`/`disconnect`: the keys the policies read must be spelled exactly as in the Docker API (`HostConfig`, not `hostconfig`; Unicode case-folding tricks like `HoſtConfig` too). Docker CLI, compose and the SDKs always do.
+- **Content-Type** must be `application/json` (any case/charset) for bodies of `/containers/create`, `/commit`, `/networks/create`, `/volumes/create` and network `connect`/`disconnect`, so the body is always parsed the same way.
+
+Map-valued fields (`Labels`, `EndpointsConfig`, `Tmpfs`, …) are opaque: their keys are data, so labels named `type` or `image` are fine, as are unknown fields.
+
+**Writing policies:** a rule may rely on exact key spelling only for fields listed in the schemas in `bodycheck/bodycheck.go`. If you write a rule on another body field, add it there — otherwise it can be bypassed by spelling the key in a different case.
 
 ## Policies (`policies/`)
 

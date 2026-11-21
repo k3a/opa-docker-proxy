@@ -404,8 +404,14 @@ func readJSONBody(r *http.Request) (data map[string]any, ok bool, err error) {
 
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, false, nil // no body: the daemon rejects it itself
+	}
+
+	// The daemon may decode a body the proxy could not (e.g. trailing data),
+	// so an unparseable body must not skip the ownership checks.
 	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, false, nil //nolint:nilerr // not a JSON object; the policy layer decides
+		return nil, false, fmt.Errorf("request body is not a valid JSON object: %w", err)
 	}
 
 	return data, true, nil

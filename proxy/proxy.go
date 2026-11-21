@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k3a/opa-docker-proxy/bodycheck"
 	"github.com/k3a/opa-docker-proxy/config"
 	"github.com/k3a/opa-docker-proxy/isolation"
 	"github.com/k3a/opa-docker-proxy/logger"
@@ -276,22 +276,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ---- 3. Build OPA input ----
 	input := buildOPAInput(r, bodyBytes, clientIP)
 
-	// ---- 4. Validate JSON body if applicable ----
-	ct := r.Header.Get("Content-Type")
-	if len(bodyBytes) > 0 && strings.HasPrefix(ct, "application/json") {
-		if !json.Valid(bodyBytes) {
-			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), "invalid JSON in request body", connID)
+	// ---- 4. Validate the body ----
+	// Reject bodies the daemon could read differently than the policies do
+	// (duplicate keys, differently-cased keys, non-JSON content type on
+	// inspected endpoints). See package bodycheck.
+	parsed, err := bodycheck.Parse(r.Method, utils.StripVersionPrefix(r.URL.Path), r.Header.Get("Content-Type"), bodyBytes)
+	if err != nil {
+		p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), err.Error(), connID)
 
-			return
-		}
+		return
+	}
 
-		var parsed any
-		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
-			p.logAndDeny(w, clientIP, r.Method, logPath, http.StatusBadRequest, r.UserAgent(), fmt.Sprintf("cannot parse request body as JSON: %v", err), connID)
-
-			return
-		}
-
+	if parsed != nil {
 		input["body"] = parsed
 	}
 

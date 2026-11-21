@@ -219,7 +219,9 @@ func TestCreateReferences(t *testing.T) {
 		{"image: shared", `{"Image":"alpine:3.19"}`, false},
 		{"image: foreign", `{"Image":"otherimg"}`, true},
 		{"image: foreign, odd case", `{"IMAGE":"otherimg"}`, true},
-		{"not json", `nope`, false},
+		// the daemon may decode what we can not: never skip the checks
+		{"not json", `nope`, true},
+		{"trailing data", `{"Image":"alpine"} {"HostConfig":{"NetworkMode":"container:other"}}`, true},
 	}
 
 	for _, tc := range tests {
@@ -479,6 +481,13 @@ func TestNetworkConnectChecksContainer(t *testing.T) {
 	bad = newReq("POST", "/networks/othernet/connect", `{"Container":"mine"}`)
 	if err := check(t, ModeFull, bad); err == nil {
 		t.Error("own container connected to foreign network")
+	}
+}
+
+func TestNetworkConnectUnparseableBodyDenied(t *testing.T) {
+	bad := newReq("POST", "/networks/mynet/connect", `{"Container":"mine"} {"Container":"other"}`)
+	if err := check(t, ModeFull, bad); err == nil {
+		t.Error("connect with trailing JSON data skipped the ownership check")
 	}
 }
 
