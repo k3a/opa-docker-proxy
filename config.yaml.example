@@ -12,7 +12,7 @@ listen:
 docker_socket: /var/run/docker.sock
 
 # Directory containing .rego policy files.
-rules_path: /etc/opa-docker-proxy/rules
+policies_path: /etc/opa-docker-proxy/policies
 
 logging:
   # Log level: debug, info, warn, error
@@ -26,3 +26,6 @@ logging:
 
   # Whether to log requests that were denied
   log_denied: true
+
+  # Whether to route Rego print() output to the log
+  log_opa: true

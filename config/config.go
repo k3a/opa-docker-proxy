@@ -82,14 +82,24 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// DefaultConfigPath is used when no config path is given on the command line.
+const DefaultConfigPath = "/etc/opa-docker-proxy/config.yaml"
+
 // LoadConfig reads a YAML config file and returns a Config.
 // It applies defaults first, then overrides with values from the file.
+// An empty path means DefaultConfigPath, which may be absent (built-in
+// defaults are used). An explicitly given path must exist.
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
 
+	explicit := path != ""
+	if !explicit {
+		path = DefaultConfigPath
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) && path == "" {
+		if os.IsNotExist(err) && !explicit {
 			// Default path not found — just return defaults.
 			return cfg, cfg.Validate()
 		}

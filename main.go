@@ -17,7 +17,7 @@ import (
 
 // cliArgs describes the command-line interface.
 type cliArgs struct {
-	Config        string `arg:"-c"               default:"/etc/opa-docker-proxy/config.yaml"                                           help:"path to configuration file"`
+	Config        string `arg:"-c"               help:"path to configuration file (default: /etc/opa-docker-proxy/config.yaml, optional)"`
 	Isolation     bool   `arg:"-i"               help:"enable isolation (name defaults to CWD hash; use --isolation-name to override)"`
 	IsolationName string `arg:"--isolation-name" help:"isolation name (implies -i)"`
 }
