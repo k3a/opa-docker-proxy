@@ -33,7 +33,10 @@ func TestParse(t *testing.T) {
 		{"endpoint names are data", "POST", "/containers/create", jsonCT, `{"NetworkingConfig":{"EndpointsConfig":{"Type":{},"type":{}}}}`, ""},
 		{"tmpfs paths are data", "POST", "/containers/create", jsonCT, `{"HostConfig":{"Tmpfs":{"/Source":"","/source":""}}}`, ""},
 		{"unknown fields", "POST", "/containers/create", jsonCT, `{"healthcheck":{"test":["CMD","x"]},"HostConfig":{"memory":1}}`, ""},
-		{"other endpoints unchecked", "POST", "/volumes/create", jsonCT, `{"name":"v","hostconfig":1}`, ""},
+		{"volume create lowercase driveropts", "POST", "/volumes/create", jsonCT, `{"Name":"v","driveropts":{"o":"bind"}}`, "DriverOpts"},
+		{"volume create lowercase driver", "POST", "/volumes/create", jsonCT, `{"driver":"x"}`, "Driver"},
+		{"volume create ok", "POST", "/volumes/create", jsonCT, `{"name":"v","Driver":"local","DriverOpts":{"Type":"x","type":"y"}}`, ""},
+		{"other endpoints unchecked", "POST", "/networks/create", jsonCT, `{"name":"v","hostconfig":1}`, ""},
 		{"non-create path", "POST", "/containers/abc/exec", jsonCT, `{"hostconfig":1}`, ""},
 
 		// duplicate keys

@@ -76,10 +76,13 @@ var containerCreate = schema{
 	"NetworkingConfig": {"EndpointsConfig": nil},
 }
 
+var volumeCreate = schema{"Driver": nil, "DriverOpts": nil}
+
 var networkMembership = schema{"Container": nil}
 
 var (
 	containerCreatePath   = regexp.MustCompile(`^/containers/create$`)
+	volumeCreatePath      = regexp.MustCompile(`^/volumes/create$`)
 	networkMembershipPath = regexp.MustCompile(`^/networks/[^/]+/(connect|disconnect)$`)
 	// Other POST endpoints whose JSON body is inspected or rewritten.
 	structuredPath = regexp.MustCompile(`^/(containers/create|commit|networks/create|volumes/create|networks/[^/]+/(connect|disconnect))$`)
@@ -143,6 +146,8 @@ func Parse(method, path, contentType string, body []byte) (any, error) {
 		switch {
 		case containerCreatePath.MatchString(path):
 			s = containerCreate
+		case volumeCreatePath.MatchString(path):
+			s = volumeCreate
 		case networkMembershipPath.MatchString(path):
 			s = networkMembership
 		}

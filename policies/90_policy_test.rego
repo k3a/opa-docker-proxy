@@ -283,6 +283,25 @@ test_mount_volume_driver_options_denied if {
 	not allow with input as create({"Mounts": [m]}) with data.config as create_cfg({"allowed_bind_prefixes": ["/etc/"]})
 }
 
+test_volume_create_driver_opts_denied if {
+	cfg := {"allow": ["volumes_write"], "allowed_bind_prefixes": ["/"]}
+	b := {"Name": "x", "Driver": "local", "DriverOpts": {"type": "none", "o": "bind", "device": "/"}}
+	not allow with input as object.union(req("POST", "/volumes/create"), {"body": b}) with data.config as cfg
+	not allow with input as object.union(req("POST", "/volumes/create"), {"body": {"DriverOpts": {"o": "bind"}}}) with data.config as cfg
+}
+
+test_volume_create_driver_denied if {
+	cfg := {"allow": ["volumes_write"]}
+	not allow with input as object.union(req("POST", "/volumes/create"), {"body": {"Name": "x", "Driver": "evil"}}) with data.config as cfg
+	not allow with input as object.union(req("POST", "/volumes/create"), {"body": {"Name": "x", "Driver": 1}}) with data.config as cfg
+}
+
+test_volume_create_plain_allowed if {
+	cfg := {"allow": ["volumes_write"]}
+	allow with input as object.union(req("POST", "/volumes/create"), {"body": {"Name": "x", "Labels": {"a": "b"}}}) with data.config as cfg
+	allow with input as object.union(req("POST", "/volumes/create"), {"body": {"Name": "x", "Driver": "local", "DriverOpts": {}}}) with data.config as cfg
+}
+
 test_mount_unknown_type_denied if {
 	not allow with input as create({"Mounts": [{"Type": "weird", "Source": "/etc", "Target": "/x"}]}) with data.config as create_cfg({})
 	not allow with input as create({"Mounts": [{"Source": "/etc", "Target": "/x"}]}) with data.config as create_cfg({})

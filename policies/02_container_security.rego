@@ -156,3 +156,32 @@ bind_source_allowed(src) if {
 	some prefix in cfg.allowed_bind_prefixes
 	startswith(src, prefix)
 }
+
+# ---------------------------------------------------------------------------
+# Volume creation
+# ---------------------------------------------------------------------------
+
+# The local driver turns DriverOpts {type: none, o: bind, device: /} into a
+# bind mount of any host path, which containers then use as a plain named
+# volume, bypassing allowed_bind_prefixes. Plugin drivers are opaque too.
+denial contains "volume creation requires a JSON object body (Content-Type: application/json)" if {
+	input.path == "/volumes/create"
+	not is_object(input.body)
+}
+
+denial contains "volume driver options are not allowed" if {
+	input.path == "/volumes/create"
+	count(input.body.DriverOpts) > 0
+}
+
+denial contains "volume drivers other than \"local\" are not allowed" if {
+	input.path == "/volumes/create"
+	driver := input.body.Driver
+	not driver in {"", "local"}
+}
+
+denial contains "volume driver must be a string" if {
+	input.path == "/volumes/create"
+	input.body.Driver
+	not is_string(input.body.Driver)
+}
