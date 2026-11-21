@@ -90,3 +90,15 @@ func TestParseReturnsValue(t *testing.T) {
 		t.Errorf("non-json: %v %v", v, err)
 	}
 }
+
+func TestParseRejectsFormBody(t *testing.T) {
+	for _, m := range []string{"POST", "PUT", "PATCH"} {
+		if _, err := Parse(m, "/images/create", "application/x-www-form-urlencoded; charset=utf-8", []byte("fromImage=evil")); err == nil {
+			t.Errorf("%s: expected error for form body", m)
+		}
+	}
+
+	if _, err := Parse("POST", "/images/create", "application/x-www-form-urlencoded", nil); err != nil {
+		t.Errorf("empty form body should pass: %v", err)
+	}
+}

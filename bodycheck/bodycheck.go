@@ -16,6 +16,9 @@
 //     (see the schemas below) must be spelled exactly as in the Docker API;
 //     a different case is an error. Every real client (docker CLI, compose,
 //     SDKs) uses the canonical spelling.
+//   - urlencoded form bodies are rejected on POST/PUT/PATCH: the daemon merges
+//     them into the query parameters (body first), which the policies and the
+//     isolation code do not see;
 //   - those endpoints require Content-Type: application/json, so that the
 //     body is always parsed the same way.
 //
@@ -90,6 +93,14 @@ func IsJSON(contentType string) bool {
 	return err == nil && mt == "application/json"
 }
 
+// IsForm reports whether a Content-Type header denotes a urlencoded form body,
+// which the Docker daemon (Go's ParseForm) merges into the query parameters.
+func IsForm(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+
+	return err == nil && mt == "application/x-www-form-urlencoded"
+}
+
 // Parse validates a request body and, for JSON bodies, returns the parsed
 // value. path is the API path without version prefix. For a non-JSON body it
 // returns (nil, nil); a non-JSON body on an endpoint whose body is inspected
@@ -97,6 +108,12 @@ func IsJSON(contentType string) bool {
 func Parse(method, path, contentType string, body []byte) (any, error) {
 	if len(body) == 0 {
 		return nil, nil //nolint:nilnil // no body, nothing to parse
+	}
+
+	if IsForm(contentType) && (method == "POST" || method == "PUT" || method == "PATCH") {
+		// The daemon calls r.ParseForm(), which merges body values ahead of
+		// the query string; the policies and isolation only see the query.
+		return nil, errors.New("Content-Type application/x-www-form-urlencoded is not allowed") //nolint:staticcheck // user-facing message
 	}
 
 	if !IsJSON(contentType) {
