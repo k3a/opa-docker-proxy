@@ -26,14 +26,14 @@ DOCKER_HOST=unix:///var/run/opa-docker-proxy.sock docker ps
 | Flag | Meaning |
 |------|---------|
 | `-c <path>` | Config file. Without it, `/etc/opa-docker-proxy/config.yaml` is used if present, otherwise built-in defaults. An explicit path must exist. |
-| `-i` | Enable isolation (also settable in the config); name defaults to first 16 hex chars of SHA-256 of the CWD |
+| `-i` | Enable isolation (also settable in the config); name defaults to the CWD with every run of non-alphanumeric characters (`/`, `.`, ...) replaced by `-` |
 | `--isolation-name <name>` | Explicit isolation name (implies `-i`, overrides `isolation.name`) |
 | `-s <path>` | Listen socket (overrides `listen.socket`) |
-| `--print-name` | Print the isolation name (CWD hash unless named) and exit |
+| `--print-name` | Print the isolation name (sanitized CWD unless named) and exit |
 | `--print-socket` | Print the socket path `-i` would use and exit |
-| `clean [--all-isolated]` | Subcommand: remove all containers, networks, volumes and images labelled with the isolation name (`--isolation-name`, else config, else CWD hash). `--all-isolated` removes every labelled object regardless of name. Talks to `docker_socket` directly, not through the proxy. |
+| `clean [--all-isolated]` | Subcommand: remove all containers, networks, volumes and images labelled with the isolation name (`--isolation-name`, else config, else sanitized CWD). `--all-isolated` removes every labelled object regardless of name. Talks to `docker_socket` directly, not through the proxy. |
 
-With `-i` / `--isolation-name` (and no `-s`), the proxy always listens on `$XDG_RUNTIME_DIR/opa-docker-proxy/<name>.sock` (fallback `~/.local/share/opa-docker-proxy/`; a per-user `0700` directory, socket mode `0600`, other users cannot connect) (name = isolation name, or the CWD hash; non-filename-safe names are hashed). (`listen.socket` is ignored; isolation enabled only via config uses it when `listen.socket` is the default). With `-i` logs always go to `<name>.log` in that directory (mode `0600`) instead of stdout; startup errors are also printed to stderr. Both files are removed on exit (SIGINT/SIGTERM exits 0); a SIGKILL leaves them behind. Script usage:
+With `-i` / `--isolation-name` (and no `-s`), the proxy always listens on `$XDG_RUNTIME_DIR/opa-docker-proxy/<name>.sock` (fallback `~/.local/share/opa-docker-proxy/`; a per-user `0700` directory, socket mode `0600`, other users cannot connect) (name = isolation name, or the sanitized CWD; non-filename-safe names are hashed). (`listen.socket` is ignored; isolation enabled only via config uses it when `listen.socket` is the default). With `-i` logs always go to `<name>.log` in that directory (mode `0600`) instead of stdout; startup errors are also printed to stderr. Both files are removed on exit (SIGINT/SIGTERM exits 0); a SIGKILL leaves them behind. Script usage:
 
 ```sh
 SOCK=$(opa-docker-proxy --print-socket)   # same path the daemon will use
@@ -59,7 +59,7 @@ YAML file; defaults are applied first, then overridden by the file. `config.yaml
 | `logging.log_denied` | `true` | Log denied requests |
 | `logging.log_opa` | `true` | Route Rego `print()` output to the log |
 | `isolation.enabled` | `false` | Label-based resource isolation, see "Isolation". The `-i` flag enables it too. |
-| `isolation.name` | CWD hash | Label value. Keep stable across restarts. |
+| `isolation.name` | sanitized CWD | Label value. Keep stable across restarts. |
 | `isolation.mode` | `full` | `full` (private-daemon view) or `writes` |
 | `policy` | read-only, hardened | Policy options passed to Rego as `data.config`, see "Policy config" |
 

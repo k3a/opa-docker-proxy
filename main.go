@@ -26,8 +26,8 @@ import (
 // cliArgs describes the command-line interface.
 type cliArgs struct {
 	Config        string `arg:"-c"               help:"configuration file (default: /etc/opa-docker-proxy/config.yaml if present, else built-in defaults)"`
-	Isolation     bool   `arg:"-i"               help:"isolate resources by label; name defaults to a hash of the current directory. Listens on a private temp socket and logs to a temp file"`
-	IsolationName string `arg:"--isolation-name" help:"use this isolation name instead of the directory hash (implies -i)"`
+	Isolation     bool   `arg:"-i"               help:"isolate resources by label; name defaults to the current directory made filename-safe. Listens on a private temp socket and logs to a temp file"`
+	IsolationName string `arg:"--isolation-name" help:"use this isolation name instead of the directory-derived name (implies -i)"`
 	Socket        string `arg:"-s,--socket"      help:"unix socket to listen on; overrides listen.socket and the -i temp socket"`
 	PrintName     bool   `arg:"--print-name"     help:"print the isolation name and exit (for scripts)"`
 	PrintSocket   bool   `arg:"--print-socket"   help:"print the socket path that -i uses and exit (for scripts)"`
@@ -322,14 +322,15 @@ func privateDir() (string, error) {
 // isolatedBasePath returns <private dir>/<name> without extension.
 func isolatedBasePath(name string) (string, error) {
 	if name == "" {
-		cwd, err := os.Getwd()
+		var err error
+
+		name, err = isolation.DefaultName()
 		if err != nil {
 			return "", err
 		}
+	}
 
-		h := sha256.Sum256([]byte(cwd))
-		name = fmt.Sprintf("%x", h[:8])
-	} else if !safeName.MatchString(name) {
+	if !safeName.MatchString(name) {
 		h := sha256.Sum256([]byte(name))
 		name = fmt.Sprintf("%x", h[:8])
 	}

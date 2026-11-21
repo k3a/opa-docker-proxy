@@ -37,7 +37,7 @@ type IsolationConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
 	// Name is the label value identifying "this" proxy's resources. Keep it
 	// stable: resources created under another name are invisible/untouchable.
-	// Defaults to a hash of the working directory.
+	// Defaults to the working directory made filename-safe (non-alphanumerics become "-").
 	Name string `json:"name" yaml:"name"`
 	// Mode is "full" (default; private-daemon view) or "writes" (reads open,
 	// only changes are restricted to own resources).

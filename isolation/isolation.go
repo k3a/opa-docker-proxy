@@ -28,7 +28,6 @@ package isolation
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,8 +101,8 @@ const (
 )
 
 // New creates a new Isolation.
-// If name is empty the name is derived from a SHA-256 hash of the current
-// working directory (first 16 hex characters). An empty mode means ModeFull.
+// If name is empty the name is derived from the current working directory
+// (see DefaultName). An empty mode means ModeFull.
 func New(name string, mode Mode) (*Isolation, error) {
 	switch mode {
 	case "":
@@ -114,16 +113,41 @@ func New(name string, mode Mode) (*Isolation, error) {
 	}
 
 	if name == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("get working directory: %w", err)
-		}
+		var err error
 
-		h := sha256.Sum256([]byte(cwd))
-		name = fmt.Sprintf("%x", h[:8])
+		name, err = DefaultName()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &Isolation{Name: name, Mode: mode}, nil
+}
+
+var unsafeNameChars = regexp.MustCompile(`[^A-Za-z0-9_]+`)
+
+// SanitizeName turns an arbitrary string (e.g. a path) into a filename-safe
+// one: every run of characters other than letters, digits and "_" (such as
+// "/", "." or spaces) becomes a single "-", and leading/trailing "-" are
+// trimmed. An empty result becomes "root".
+func SanitizeName(s string) string {
+	s = strings.Trim(unsafeNameChars.ReplaceAllString(s, "-"), "-")
+	if s == "" {
+		return "root"
+	}
+
+	return s
+}
+
+// DefaultName returns the default isolation name: the current working
+// directory made filename-safe by SanitizeName.
+func DefaultName() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get working directory: %w", err)
+	}
+
+	return SanitizeName(cwd), nil
 }
 
 // labelFilterValue returns the value that should appear inside a Docker
