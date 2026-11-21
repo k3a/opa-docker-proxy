@@ -123,13 +123,20 @@ func createReferences(body map[string]any) []reference {
 
 		for _, mount := range objects(lookup(hc, "Mounts")) {
 			for _, t := range strs(lookup(mount, "Type")) {
-				if t != "volume" {
-					continue
-				}
-
-				for _, src := range strs(lookup(mount, "Source")) {
-					if src != "" {
-						refs = append(refs, reference{typ: ResourceVolume, id: src, noCreate: foreignDriver(hc) || mountDriverIsForeign(mount)})
+				switch t {
+				case "volume":
+					for _, src := range strs(lookup(mount, "Source")) {
+						if src != "" {
+							refs = append(refs, reference{typ: ResourceVolume, id: src, noCreate: foreignDriver(hc) || mountDriverIsForeign(mount)})
+						}
+					}
+				case "image":
+					// Image mounts expose an image's filesystem; Source is
+					// an image reference or ID.
+					for _, src := range strs(lookup(mount, "Source")) {
+						if src != "" {
+							refs = append(refs, reference{typ: ResourceImage, id: src})
+						}
 					}
 				}
 			}

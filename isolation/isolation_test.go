@@ -218,6 +218,8 @@ func TestCreateReferences(t *testing.T) {
 		{"image: own", `{"Image":"myimg"}`, false},
 		{"image: shared", `{"Image":"alpine:3.19"}`, false},
 		{"image: foreign", `{"Image":"otherimg"}`, true},
+		{"image mount: foreign", `{"HostConfig":{"Mounts":[{"Type":"image","Source":"otherimg","Target":"/x"}]}}`, true},
+		{"image mount: own", `{"HostConfig":{"Mounts":[{"Type":"image","Source":"myimg","Target":"/x"}]}}`, false},
 		{"image: foreign, odd case", `{"IMAGE":"otherimg"}`, true},
 		// the daemon may decode what we can not: never skip the checks
 		{"not json", `nope`, true},
