@@ -145,6 +145,15 @@ denial contains sprintf("adding Linux capability %s is not allowed (enable with 
 	not name in allowed_capabilities
 }
 
+# The daemon also accepts a bare string for CapAdd ("SYS_ADMIN"), which the
+# rule above would not iterate over, so anything but an array is refused.
+denial contains "HostConfig.CapAdd must be an array" if {
+	is_container_create
+	c := input.body.HostConfig.CapAdd
+	c != null
+	not is_array(c)
+}
+
 # ---------------------------------------------------------------------------
 # Mounts
 # ---------------------------------------------------------------------------

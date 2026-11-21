@@ -234,6 +234,7 @@ test_create_volumes_from if {
 
 test_create_capabilities if {
 	not allow with input as create({"CapAdd": ["SYS_ADMIN"]}) with data.config as create_cfg({})
+	not allow with input as create({"CapAdd": "SYS_ADMIN"}) with data.config as create_cfg({})
 	not allow with input as create({"CapAdd": ["ALL"]}) with data.config as create_cfg({})
 	allow with input as create({"CapAdd": ["CHOWN", "NET_BIND_SERVICE"]}) with data.config as create_cfg({})
 }

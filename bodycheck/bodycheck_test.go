@@ -28,6 +28,11 @@ func TestParse(t *testing.T) {
 		{"connect container", "POST", "/networks/n1/connect", jsonCT, `{"container":"x"}`, "non-canonical"},
 		{"connect ok", "POST", "/networks/n1/connect", jsonCT, `{"Container":"x"}`, ""},
 
+		// StrSlice fields accept a bare string in the daemon
+		{"capadd string", "POST", "/containers/create", jsonCT, `{"HostConfig":{"CapAdd":"SYS_ADMIN"}}`, "HostConfig.CapAdd must be a JSON array"},
+		{"capdrop string", "POST", "/containers/create", jsonCT, `{"HostConfig":{"CapDrop":"ALL"}}`, "HostConfig.CapDrop must be a JSON array"},
+		{"capadd array", "POST", "/containers/create", jsonCT, `{"HostConfig":{"CapAdd":["CHOWN"],"CapDrop":null}}`, ""},
+
 		// data keys and unknown fields are not touched
 		{"labels are data", "POST", "/containers/create", jsonCT, `{"Labels":{"image":"x","IMAGE":"y","hostconfig":"z"}}`, ""},
 		{"endpoint names are data", "POST", "/containers/create", jsonCT, `{"NetworkingConfig":{"EndpointsConfig":{"Type":{},"type":{}}}}`, ""},

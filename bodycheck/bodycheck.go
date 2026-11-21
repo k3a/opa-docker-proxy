@@ -62,6 +62,7 @@ var containerCreate = schema{
 		"MaskedPaths":       nil,
 		"ReadonlyPaths":     nil,
 		"CapAdd":            nil,
+		"CapDrop":           nil,
 		"Binds":             nil,
 		"VolumesFrom":       nil,
 		"Links":             nil,
@@ -166,9 +167,43 @@ func Parse(method, path, contentType string, body []byte) (any, error) {
 				return nil, err
 			}
 		}
+
+		if containerCreatePath.MatchString(path) {
+			if err := checkStrSlices(parsed); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return parsed, nil
+}
+
+// checkStrSlices rejects HostConfig fields that the daemon decodes as a
+// strslice.StrSlice (which also accepts a bare string) when they are not
+// arrays: a policy iterating over them would see nothing for a string.
+func checkStrSlices(v any) error {
+	body, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	hc, ok := body["HostConfig"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	for _, key := range []string{"CapAdd", "CapDrop"} {
+		val, present := hc[key]
+		if !present || val == nil {
+			continue
+		}
+
+		if _, isArray := val.([]any); !isArray {
+			return fmt.Errorf("HostConfig.%s must be a JSON array", key)
+		}
+	}
+
+	return nil
 }
 
 // check verifies that no key of v is a differently-cased spelling of a schema
