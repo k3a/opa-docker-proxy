@@ -22,6 +22,10 @@ type LoggingConfig struct {
 type ListenConfig struct {
 	Socket  string `json:"socket"  yaml:"socket"`
 	Address string `json:"address" yaml:"address"`
+
+	// SocketMode overrides the permissions of the listen socket (0 = 0666).
+	// Set internally for auto-generated per-user sockets; not configurable.
+	SocketMode uint32 `json:"-" yaml:"-"`
 }
 
 // DefaultSocket is the listen socket used when none is configured.

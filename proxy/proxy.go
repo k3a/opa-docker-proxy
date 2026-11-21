@@ -179,7 +179,12 @@ func (p *Proxy) Start() error {
 			return fmt.Errorf("listen on unix socket %s: %w", socket, err)
 		}
 
-		if err := os.Chmod(socket, 0666); err != nil {
+		mode := os.FileMode(0o666)
+		if m := p.config.Listen.SocketMode; m != 0 {
+			mode = os.FileMode(m)
+		}
+
+		if err := os.Chmod(socket, mode); err != nil {
 			if cerr := l.Close(); cerr != nil {
 				slog.Warn("failed to close listener", "error", cerr)
 			}

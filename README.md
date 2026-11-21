@@ -33,7 +33,7 @@ DOCKER_HOST=unix:///var/run/opa-docker-proxy.sock docker ps
 | `--print-socket` | Print the socket path `-i` would use and exit |
 | `clean [--all-isolated]` | Subcommand: remove all containers, networks, volumes and images labelled with the isolation name (`--isolation-name`, else config, else CWD hash). `--all-isolated` removes every labelled object regardless of name. Talks to `docker_socket` directly, not through the proxy. |
 
-With `-i` / `--isolation-name` (and no `-s`), the proxy always listens on `$TMPDIR/opa-docker-proxy/<name>.sock` (name = isolation name, or the CWD hash; non-filename-safe names are hashed). (`listen.socket` is ignored; isolation enabled only via config uses it when `listen.socket` is the default). With `-i` logs always go to `<name>.log` in that directory (mode `0600`) instead of stdout; startup errors are also printed to stderr. Both files are removed on exit (SIGINT/SIGTERM exits 0); a SIGKILL leaves them behind. Script usage:
+With `-i` / `--isolation-name` (and no `-s`), the proxy always listens on `$XDG_RUNTIME_DIR/opa-docker-proxy/<name>.sock` (fallback `~/.local/share/opa-docker-proxy/`; a per-user `0700` directory, socket mode `0600`, other users cannot connect) (name = isolation name, or the CWD hash; non-filename-safe names are hashed). (`listen.socket` is ignored; isolation enabled only via config uses it when `listen.socket` is the default). With `-i` logs always go to `<name>.log` in that directory (mode `0600`) instead of stdout; startup errors are also printed to stderr. Both files are removed on exit (SIGINT/SIGTERM exits 0); a SIGKILL leaves them behind. Script usage:
 
 ```sh
 SOCK=$(opa-docker-proxy --print-socket)   # same path the daemon will use

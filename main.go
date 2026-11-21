@@ -46,7 +46,7 @@ func (cliArgs) Description() string {
 }
 
 func (cliArgs) Epilogue() string {
-	return `With -i the socket is $TMPDIR/opa-docker-proxy/<name>.sock and logs go to
+	return `With -i the socket is $XDG_RUNTIME_DIR/opa-docker-proxy/<name>.sock (or ~/.local/share/opa-docker-proxy/) and logs go to
 <name>.log next to it; both are removed on exit.
 
 Examples:
@@ -122,6 +122,7 @@ func main() {
 			os.Exit(1)
 		}
 
+		cfg.Listen.SocketMode = 0o600
 		autoSocket = true
 	}
 
@@ -254,8 +255,8 @@ func main() {
 
 var safeName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
-// isolatedSocketPath returns $TMPDIR/opa-docker-proxy/<name>.sock, creating the shared
-// parent directory (world-writable + sticky, like /tmp) if needed. Names that
+// isolatedSocketPath returns <private dir>/<name>.sock, creating the per-user
+// parent directory (mode 0700) if needed. Names that
 // are not filename-safe are replaced by a hash. An empty name uses the same
 // CWD hash as the isolation default, so the path is predictable.
 func isolatedSocketPath(name string) (string, error) {
@@ -267,7 +268,58 @@ func isolatedSocketPath(name string) (string, error) {
 	return base + ".sock", nil
 }
 
-// isolatedBasePath returns $TMPDIR/opa-docker-proxy/<name> without extension.
+// privateDir returns a per-user directory (mode 0700, owned by the current
+// uid) for auto-generated sockets and logs. It prefers $XDG_RUNTIME_DIR and
+// falls back to ~/.local/share/opa-docker-proxy. An existing path is accepted
+// only if it is a real directory (no symlink) owned by us with no group or
+// other access.
+func privateDir() (string, error) {
+	uid := os.Getuid()
+
+	var dir string
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" && filepath.IsAbs(rt) {
+		dir = filepath.Join(rt, "opa-docker-proxy")
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+
+		// Create the parents if missing (the leaf is verified below).
+		base := filepath.Join(home, ".local", "share")
+		if err := os.MkdirAll(base, 0o700); err != nil {
+			return "", err
+		}
+
+		dir = filepath.Join(base, "opa-docker-proxy")
+	}
+
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%s is not a regular directory", dir)
+	}
+
+	if int(st.Uid) != uid {
+		return "", fmt.Errorf("%s is not owned by the current user", dir)
+	}
+
+	if fi.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("%s has insecure permissions %v (want 0700)", dir, fi.Mode().Perm())
+	}
+
+	return dir, nil
+}
+
+// isolatedBasePath returns <private dir>/<name> without extension.
 func isolatedBasePath(name string) (string, error) {
 	if name == "" {
 		cwd, err := os.Getwd()
@@ -282,12 +334,10 @@ func isolatedBasePath(name string) (string, error) {
 		name = fmt.Sprintf("%x", h[:8])
 	}
 
-	dir := filepath.Join(os.TempDir(), "opa-docker-proxy")
-	if err := os.MkdirAll(dir, 0o1777); err != nil && !errors.Is(err, os.ErrExist) {
+	dir, err := privateDir()
+	if err != nil {
 		return "", err
 	}
-
-	_ = os.Chmod(dir, 0o1777) // MkdirAll is subject to umask; ignore if not owner
 
 	return filepath.Join(dir, name), nil
 }
