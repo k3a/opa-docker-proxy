@@ -30,6 +30,9 @@ type Config struct {
 	DockerSocket string        `json:"docker_socket" yaml:"docker_socket"`
 	PoliciesPath string        `json:"policies_path" yaml:"policies_path"`
 	Logging      LoggingConfig `json:"logging"       yaml:"logging"`
+	// Policy is passed to the Rego policies as data.config. Its schema and
+	// validation live in policies/00_config.rego.
+	Policy map[string]any `json:"policy" yaml:"policy"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.

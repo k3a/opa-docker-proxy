@@ -2,14 +2,18 @@ package opa
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
+	"github.com/open-policy-agent/opa/v1/storage"
+	"github.com/open-policy-agent/opa/v1/storage/inmem"
 	"github.com/open-policy-agent/opa/v1/topdown/print"
 )
 
@@ -22,7 +26,11 @@ type Engine struct {
 // query for both "allow" and "reason". The policy files must define a rule
 // named "allow" that evaluates to true when a request is permitted, and a
 // rule named "reason" that provides a human-readable explanation.
-func NewEngine(polDir string, allowOPAPrint bool) (*Engine, error) {
+//
+// policyConfig is exposed to the policies as data.config. The policies
+// validate it and report problems in data.policies.config_errors; a non-empty
+// set makes NewEngine fail.
+func NewEngine(polDir string, allowOPAPrint bool, policyConfig map[string]any) (*Engine, error) {
 	regoFiles, err := findRegoFiles(polDir)
 	if err != nil {
 		return nil, fmt.Errorf("find rego files in %s: %w", polDir, err)
@@ -51,12 +59,22 @@ func NewEngine(polDir string, allowOPAPrint bool) (*Engine, error) {
 		return nil, fmt.Errorf("compile rego modules: %w", err)
 	}
 
+	store, err := newConfigStore(policyConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := checkConfig(compiler, store); err != nil {
+		return nil, err
+	}
+
 	// Prepare the query. We query both "allow" and "reason" from the
 	// "policies" package so that the host can forward a meaningful
 	// explanation when a request is denied.
 	r := rego.New(
 		rego.Query("result = data.policies.allow; reason = data.policies.reason"),
 		rego.Compiler(compiler),
+		rego.Store(store),
 		rego.PrintHook(&slogPrintHook{allowOPAPrint}),
 	)
 
@@ -68,6 +86,66 @@ func NewEngine(polDir string, allowOPAPrint bool) (*Engine, error) {
 	return &Engine{
 		prepared: prepared,
 	}, nil
+}
+
+// newConfigStore builds a store holding the policy config as data.config.
+func newConfigStore(policyConfig map[string]any) (storage.Store, error) {
+	if policyConfig == nil {
+		policyConfig = map[string]any{}
+	}
+
+	// Round-trip through JSON so that YAML-decoded values (e.g. int) become
+	// plain JSON types the store accepts.
+	raw, err := json.Marshal(policyConfig)
+	if err != nil {
+		return nil, fmt.Errorf("encode policy config: %w", err)
+	}
+
+	var normalized map[string]any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		return nil, fmt.Errorf("decode policy config: %w", err)
+	}
+
+	return inmem.NewFromObject(map[string]any{"config": normalized}), nil
+}
+
+// checkConfig fails when the policies report errors for the given config.
+func checkConfig(compiler *ast.Compiler, store storage.Store) error {
+	ctx := context.Background()
+
+	q, err := rego.New(
+		rego.Query("data.policies.config_errors"),
+		rego.Compiler(compiler),
+		rego.Store(store),
+	).PrepareForEval(ctx)
+	if err != nil {
+		return fmt.Errorf("prepare config validation: %w", err)
+	}
+
+	rs, err := q.Eval(ctx)
+	if err != nil {
+		return fmt.Errorf("validate policy config: %w", err)
+	}
+
+	var msgs []string
+
+	for _, r := range rs {
+		for _, e := range r.Expressions {
+			if list, ok := e.Value.([]any); ok {
+				for _, m := range list {
+					msgs = append(msgs, fmt.Sprint(m))
+				}
+			}
+		}
+	}
+
+	if len(msgs) > 0 {
+		sort.Strings(msgs)
+
+		return fmt.Errorf("invalid policy config: %s", strings.Join(msgs, "; "))
+	}
+
+	return nil
 }
 
 // EvalResult is the outcome of a policy evaluation.

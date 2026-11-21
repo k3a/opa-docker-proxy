@@ -1,29 +1,37 @@
 package policies
 
 # ============================================================================
-# Deny framework — provides the denial accumulator and the master allow rule.
+# Decision framework.
 #
-# Other policy files contribute entries to the "denial" set.  When denial is
-# non-empty the request is rejected, regardless of any permissive allow rules
-# defined in the basic policies.
+# A request is allowed when BOTH hold:
+#   1. request_permitted — the operation is enabled. By default only
+#      read-only requests are; more are enabled via `policy.allow` in the
+#      config (03_operations.rego).
+#   2. denial is empty — no hardening rule objects. Denials can not be
+#      overridden by any permissive rule; they are relaxed only through
+#      config (the rules themselves read it).
+#
+# Policy files extend the system by adding to `denial` or by adding bodies to
+# `request_permitted`. Nothing else may define `allow`.
 # ============================================================================
-
-# denial is a set of human-readable messages.  Each security policy file adds
-# one or more entries when a rule is violated.  When no deny rule matches,
-# the set remains empty and requests are allowed (subject to the allow rules
-# in other policy files).
 
 default allow := false
 
-# A request is allowed only when nothing denies it.
 allow if {
-    count(denial) == 0
+	request_permitted
+	count(denial) == 0
 }
 
-# A reason text describing the denial.
+# Invalid configuration denies everything.
+denial contains sprintf("invalid policy config: %s", [e]) if some e in config_errors
+
+default request_permitted := false
+
+# Human-readable explanation of a denial.
 default reason := ""
 
-# Join all denial messages into a single string, or use the default if allowed.
-reason := concat("; ", denial) if {
-    not allow
-}
+reasons contains msg if some msg in denial
+
+reasons contains not_permitted_message if not request_permitted
+
+reason := concat("; ", reasons) if not allow

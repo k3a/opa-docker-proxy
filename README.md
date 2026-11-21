@@ -44,6 +44,7 @@ YAML file; defaults are applied first, then overridden by the file. See `config.
 | `logging.log_allowed` | `true` | Log allowed requests |
 | `logging.log_denied` | `true` | Log denied requests |
 | `logging.log_opa` | `true` | Route Rego `print()` output to the log |
+| `policy` | read-only, hardened | Policy options passed to Rego as `data.config`, see "Policy config" |
 
 Validation: at least one of `listen.socket`/`listen.address`, non-empty `docker_socket` and `policies_path`, valid level/format. There is no authentication of its own — access control is the socket permissions plus your policies.
 
@@ -74,24 +75,42 @@ The version prefix is stripped from `path`, so policies match clean paths like `
 
 All files are `package policies` and are loaded together, in one module set. Contract: the engine reads `data.policies.allow` (bool) and `data.policies.reason` (string).
 
-**Model:** deny-set. Rules add messages to the `denial` set; `allow` is true when `denial` is empty. Files are numbered by purpose:
+**Model: read-only and hardened by default.** A request is allowed only if
+
+1. its operation is *permitted* — by default only `GET`/`HEAD` (minus secrets/configs and websocket attach); write operations belong to named groups you enable in the config, **and**
+2. the `denial` set is empty — hardening rules (privileged, host namespaces, dangerous capabilities, bind mounts, …) have no objections.
+
+Denials can't be overridden by any permissive rule; they are relaxed only through the config, which the rules themselves read. This keeps rules independent (no matching on each other's messages). Files are numbered by purpose:
 
 | File | Effect |
 |------|--------|
-| `01_framework.rego` | `allow` / `reason` definitions (defaults to deny). Don't remove. |
-| `02_container_security.rego` | On `/containers/create` deny: privileged, `CapAdd` of `SYS_ADMIN`/`NET_ADMIN`/`SYS_PTRACE`/`ALL`, host network/PID/userns, any bind mounts (`Binds` or `Mounts` of type bind). |
-| `03_block_exec_build.rego` | Deny container exec, `/exec/*/start`, and `/build`. |
-| `04_readonly_resources.rego` | Only `GET` on `/volumes`, `/networks`, `/images`. |
-| `05_block_secrets_configs.rego` | Deny `/secrets*` and `/configs*`. |
-| `06_internal_network.rego` | Deny clients outside RFC1918/loopback (Unix-socket clients exempt). |
-| `50_allow_safe_host_mounts.rego` | Extra `allow` rule: permits `/containers/create` with bind mounts when every source starts with `/dev/` or `/temp/agent/`, contains no `..` component, and no other denial exists. |
-| `50_allow_safe_host_mounts_test.rego` | `opa test` unit tests for the above. |
+| `00_config.rego` | Config defaults (`default_config`), merge with `data.config`, validation (`config_errors`). |
+| `01_framework.rego` | `allow` / `reason`. Don't remove. The only place that defines `allow`. |
+| `02_container_security.rego` | Hardening for `/containers/create`: privileged, host network/PID/IPC/userns, host devices, unconfined seccomp/AppArmor/SELinux, dangerous `CapAdd` (case and `CAP_` prefix normalized), bind mounts outside allowed prefixes (`Binds` and `Mounts`), volume mounts with driver options (bind bypass), unknown mount types, non-JSON body. |
+| `03_operations.rego` | The operation allowlist: read-only default plus write groups. |
+| `06_internal_network.rego` | Deny clients outside `allowed_client_cidrs` (Unix-socket clients exempt). |
+| `90_policy_test.rego` | `opa test` unit tests. |
+
+### Policy config (`policy:` in config.yaml)
+
+Loaded as `data.config`; see `config.yaml.example` for all options and the full token list.
+
+```yaml
+policy:
+  allow: [containers_create, containers_control, containers_delete]  # enable write groups / exempt hardening rules
+  allowed_bind_prefixes: ["/dev/", "/temp/agent/"]                   # bind mounts only below these (must start+end with "/")
+  allowed_capabilities: [NET_ADMIN]                                  # dangerous caps that may still be added
+  allowed_client_cidrs: ["10.0.0.0/8"]                               # default: loopback + RFC1918
+```
+
+Every key defaults to the strictest value. Unknown keys, unknown `allow` tokens and malformed values make the proxy **refuse to start** (and deny everything if it somehow ran). Denial messages tell you which token or option would relax the rule.
 
 Notes:
-- `policies_extra/deny_admin.rego` is **not loaded** by default; it is an optional stricter rule set (denies container lifecycle ops, container creation, all DELETEs). Copy it into the policies directory to enable it.
+- `policies_extra/deny_admin.rego` is **not loaded** by default; it is an optional stricter rule set (denies container lifecycle ops, container creation, all DELETEs). Copy it into the policies directory to enable it. With the read-only default it is mostly redundant.
+- Extra policy files can add to `denial` (always safe) or add bodies to `request_permitted` (to enable further endpoints). Do not define `allow`.
 - Every `*.rego` file in `policies_path` is loaded, including `*_test.rego`.
-- The safe-mount override matches the exact denial text `"bind mounts are not allowed"`. The `Mounts`-array variant in `02` interpolates the mount into its message, so it is not matched by that override. If you rely on `Mounts`-based safe mounts, verify with the tests.
-- Policies are compiled once at startup — restart to apply changes.
+- Bind-mount checks are textual: symlinks inside an allowed prefix are not resolved. Only allow prefixes you control.
+- Policies and config are read once at startup — restart to apply changes.
 - Test policies: `opa test policies/ -v` (requires the OPA CLI).
 
 ## Isolation (`isolation/`, `-i` / `--isolation-name`)

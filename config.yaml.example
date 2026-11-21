@@ -29,3 +29,46 @@ logging:
 
   # Whether to route Rego print() output to the log
   log_opa: true
+
+# Policy settings, passed to the Rego policies (see policies/00_config.rego).
+#
+# By default the proxy is READ-ONLY and blocks everything dangerous. Uncomment
+# only what you need. Invalid values make the proxy refuse to start.
+policy:
+  # Enable write operations and relax hardening rules by name.
+  #
+  # Operation groups (everything not listed here and not a read is denied):
+  #   containers_create    POST /containers/create (still hardened, see below)
+  #   containers_control   start/stop/restart/kill/pause/unpause/wait/resize/attach/rename/update
+  #   containers_delete    DELETE /containers/{id}, prune
+  #   exec                 create/start exec instances
+  #   build                image build (/build, /session, /grpc)
+  #   images_write         pull/push/tag/load/commit/delete images
+  #   volumes_write        create/delete volumes
+  #   networks_write       create/delete/connect networks
+  #   secrets_configs_read GET /secrets, /configs, /swarm/unlockkey
+  #
+  # Hardening exemptions for container creation:
+  #   privileged, host_network, host_pid, host_ipc, host_userns,
+  #   devices, unconfined_security
+  allow: []
+  #  - containers_create
+  #  - containers_control
+  #  - containers_delete
+
+  # Host path prefixes bind mounts may use (Binds and Mounts of type bind).
+  # Each must start and end with "/"; paths containing ".." are always denied.
+  # Default: none, i.e. no bind mounts.
+  allowed_bind_prefixes: []
+  #  - /dev/
+  #  - /temp/agent/
+
+  # Dangerous capabilities that may still be added with CapAdd
+  # (e.g. NET_ADMIN). The dangerous list: ALL, BPF, DAC_READ_SEARCH,
+  # MAC_ADMIN, MAC_OVERRIDE, NET_ADMIN, PERFMON, SYS_ADMIN, SYS_BOOT,
+  # SYS_MODULE, SYS_PTRACE, SYS_RAWIO, SYS_TIME.
+  allowed_capabilities: []
+
+  # Client networks allowed to use the proxy (Unix socket clients always are).
+  # Default: loopback and RFC1918 ranges.
+  # allowed_client_cidrs: ["10.0.0.0/8", "127.0.0.0/8"]
