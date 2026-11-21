@@ -7,6 +7,11 @@ func TestSplitVersionPath(t *testing.T) {
 		{"/v1.44/containers/json", "v1.44", "/containers/json"},
 		{"/v1.44/volumes/create", "v1.44", "/volumes/create"},
 		{"/v2/containers/json", "v2", "/containers/json"},
+		// Lenient forms accepted by the daemon router (v[0-9.]+).
+		{"/v1.45./secrets", "v1.45.", "/secrets"},
+		{"/v1..45/configs", "v1..45", "/configs"},
+		{"/v./swarm/unlockkey", "v.", "/swarm/unlockkey"},
+		{"/v1.45x/secrets", "", "/v1.45x/secrets"},
 		{"/containers/json", "", "/containers/json"},
 		{"/volumes/create", "", "/volumes/create"}, // not a version
 		{"/volumes/myvol", "", "/volumes/myvol"},

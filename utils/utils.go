@@ -7,7 +7,10 @@ import (
 )
 
 // versionSegment matches an API version path segment such as v1.44.
-var versionSegment = regexp.MustCompile(`^v[0-9]+(\.[0-9]+)*$`)
+// It deliberately mirrors the Docker daemon's router pattern
+// (/v{version:[0-9.]+}) so that lenient forms the daemon accepts, such as
+// "v1.45." or "v1..45", are stripped here too and cannot bypass path rules.
+var versionSegment = regexp.MustCompile(`^v[0-9.]+$`)
 
 // ---------------------------------------------------------------------------
 // URL path helpers – determine what kind of Docker API endpoint we are
