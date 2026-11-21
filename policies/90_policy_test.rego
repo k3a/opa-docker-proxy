@@ -194,6 +194,11 @@ test_create_opt_in_of_one_does_not_relax_another if {
 test_create_devices_and_unconfined if {
 	not allow with input as create({"Devices": [{"PathOnHost": "/dev/sda"}]}) with data.config as create_cfg({})
 	not allow with input as create({"SecurityOpt": ["seccomp=unconfined"]}) with data.config as create_cfg({})
+	not allow with input as create({"SecurityOpt": ["seccomp={\"defaultAction\":\"SCMP_ACT_ALLOW\"}"]}) with data.config as create_cfg({})
+	not allow with input as create({"SecurityOpt": ["label=type:spc_t"]}) with data.config as create_cfg({})
+	not allow with input as create({"SecurityOpt": ["apparmor=my-permissive"]}) with data.config as create_cfg({})
+	allow with input as create({"SecurityOpt": ["no-new-privileges"]}) with data.config as create_cfg({})
+	allow with input as create({"SecurityOpt": ["no-new-privileges=true"]}) with data.config as create_cfg({})
 	not allow with input as create({"SecurityOpt": ["label=disable"]}) with data.config as create_cfg({})
 	allow with input as create({"SecurityOpt": ["no-new-privileges"]}) with data.config as create_cfg({})
 	not allow with input as create({"MaskedPaths": [], "ReadonlyPaths": []}) with data.config as create_cfg({})

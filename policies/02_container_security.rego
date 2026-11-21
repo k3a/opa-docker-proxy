@@ -76,10 +76,13 @@ denial contains "device requests are not allowed (enable with policy.allow: devi
 	not opt_in("devices")
 }
 
-denial contains "unconfined security options are not allowed (enable with policy.allow: unconfined_security)" if {
+# SecurityOpt is an allowlist: seccomp= (which accepts inline JSON profiles),
+# apparmor= and label= (e.g. type:spc_t) can all remove confinement, so only
+# options known to be harmless pass without unconfined_security.
+denial contains "security options are not allowed (enable with policy.allow: unconfined_security)" if {
 	is_container_create
 	some opt in input.body.HostConfig.SecurityOpt
-	unconfined_option(opt)
+	not safe_security_opt(opt)
 	not opt_in("unconfined_security")
 }
 
@@ -93,9 +96,9 @@ denial contains "MaskedPaths/ReadonlyPaths overrides are not allowed (enable wit
 	not opt_in("unconfined_security")
 }
 
-unconfined_option(opt) if contains(lower(opt), "unconfined")
+safe_security_opt(opt) if regex.match(`^no-new-privileges([=:](true|false))?$`, lower(opt))
 
-unconfined_option(opt) if lower(opt) in {"label=disable", "label:disable"}
+safe_security_opt(opt) if lower(opt) in {"apparmor=docker-default", "apparmor:docker-default"}
 
 # ---------------------------------------------------------------------------
 # Exec
