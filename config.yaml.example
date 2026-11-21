@@ -58,7 +58,7 @@ policy:
   #                        only images built or committed through the proxy)
   #   volumes_write        create/delete volumes
   #   networks_write       create/delete/connect networks
-  #   secrets_configs_read GET /secrets, /configs, /swarm/unlockkey
+  #   secrets_configs_read GET /secrets, /configs, /swarm, /services, /tasks
   #
   # Hardening exemptions for container creation:
   #   privileged, host_network, host_pid, host_ipc, host_userns,

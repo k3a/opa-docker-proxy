@@ -42,10 +42,11 @@ operation_groups := {
 
 read_methods := {"GET", "HEAD"}
 
-# Reads that expose secrets.
-sensitive_read if regex.match(`^/(secrets|configs)`, input.path)
+# Reads that expose secrets: secret/config objects, the swarm object (join
+# tokens, unlock key) and service/task specs (Env, secret/config references).
+sensitive_read if regex.match(`^/(secrets|configs)(/|$)`, input.path)
 
-sensitive_read if input.path == "/swarm/unlockkey"
+sensitive_read if regex.match(`^/(swarm|services|tasks)(/|$)`, input.path)
 
 # Websocket attach is a GET but can send input to the container.
 attach_ws if regex.match(`^/containers/[^/]+/attach/ws$`, input.path)

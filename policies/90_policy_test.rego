@@ -51,6 +51,9 @@ test_default_denies_sensitive_reads if {
 	not allow with input as req("GET", "/secrets") with data.config as {}
 	not allow with input as req("GET", "/configs/abc") with data.config as {}
 	not allow with input as req("GET", "/swarm/unlockkey") with data.config as {}
+	not allow with input as req("GET", "/swarm") with data.config as {}
+	not allow with input as req("GET", "/services/abc") with data.config as {}
+	not allow with input as req("GET", "/tasks") with data.config as {}
 	not allow with input as req("GET", "/containers/abc/attach/ws") with data.config as {}
 }
 
