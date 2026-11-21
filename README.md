@@ -30,6 +30,7 @@ DOCKER_HOST=unix:///var/run/opa-docker-proxy.sock docker ps
 | `--isolation-name <name>` | Explicit isolation name (implies `-i`, overrides `isolation.name`) |
 | `-s <path>` | Listen socket (overrides `listen.socket`) |
 | `--print-socket` | Print the resolved socket path and exit |
+| `clean [--all-isolated]` | Subcommand: remove all containers, networks, volumes and images labelled with the isolation name (`--isolation-name`, else config, else CWD hash). `--all-isolated` removes every labelled object regardless of name. Talks to `docker_socket` directly, not through the proxy. |
 
 With isolation on and no socket configured, the proxy listens on `$TMPDIR/opa-docker-proxy/<name>.sock` (name = isolation name, or the CWD hash; non-filename-safe names are hashed). In this mode logs go to `<name>.log` next to the socket (mode `0600`) instead of stdout; startup errors are also printed to stderr. Both files are removed on exit (SIGINT/SIGTERM exits 0); a SIGKILL leaves them behind. Script usage:
 

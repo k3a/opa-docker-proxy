@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +31,13 @@ type cliArgs struct {
 	IsolationName string `arg:"--isolation-name" help:"isolation name (implies -i)"`
 	Socket        string `arg:"-s,--socket"      help:"unix socket to listen on (overrides listen.socket); with isolation and no socket configured: $TMPDIR/opa-docker-proxy/<name>.sock"`
 	PrintSocket   bool   `arg:"--print-socket"   help:"print the resolved socket path to stdout and exit (for scripts)"`
+
+	Clean *cleanCmd `arg:"subcommand:clean" help:"remove containers, networks, volumes and images labelled by isolation (current directory's by default)"`
+}
+
+// cleanCmd removes isolated objects directly through the Docker socket.
+type cleanCmd struct {
+	All bool `arg:"--all-isolated" help:"remove objects of every isolation name (any directory), not just the current one"`
 }
 
 func (cliArgs) Description() string {
@@ -74,6 +83,10 @@ func main() {
 	if args.PrintSocket {
 		fmt.Println(cfg.Listen.Socket)
 		return
+	}
+
+	if args.Clean != nil {
+		os.Exit(runClean(cfg, args))
 	}
 
 	// Initialise structured logging.
@@ -225,4 +238,53 @@ func isolatedSocketPath(name string) (string, error) {
 	_ = os.Chmod(dir, 0o1777) // MkdirAll is subject to umask; ignore if not owner
 
 	return filepath.Join(dir, name+".sock"), nil
+}
+
+// runClean implements the clean subcommand and returns the exit code.
+func runClean(cfg config.Config, args cliArgs) int {
+	name := cfg.Isolation.Name
+	if args.IsolationName != "" {
+		name = args.IsolationName
+	}
+
+	iso, err := isolation.New(name, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				return net.Dial("unix", cfg.DockerSocket)
+			},
+		},
+	}
+
+	if args.Clean.All {
+		fmt.Println("cleaning all isolated objects (any isolation name)")
+	} else {
+		fmt.Printf("cleaning objects of isolation %q\n", iso.Name)
+	}
+
+	res, err := isolation.Clean(context.Background(), client, iso.Name, args.Clean.All,
+		func(t isolation.ResourceType, id string) { fmt.Printf("removed %v %s\n", t, id) })
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("removed: %d containers, %d networks, %d volumes, %d images\n",
+		res.Removed[isolation.ResourceContainer], res.Removed[isolation.ResourceNetwork],
+		res.Removed[isolation.ResourceVolume], res.Removed[isolation.ResourceImage])
+
+	for _, f := range res.Failures {
+		fmt.Fprintf(os.Stderr, "failed: %s\n", f)
+	}
+
+	if len(res.Failures) > 0 {
+		return 1
+	}
+
+	return 0
 }
