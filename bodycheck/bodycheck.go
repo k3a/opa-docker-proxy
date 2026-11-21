@@ -59,6 +59,8 @@ var containerCreate = schema{
 		"DeviceCgroupRules": nil,
 		"DeviceRequests":    nil,
 		"SecurityOpt":       nil,
+		"MaskedPaths":       nil,
+		"ReadonlyPaths":     nil,
 		"CapAdd":            nil,
 		"Binds":             nil,
 		"VolumesFrom":       nil,

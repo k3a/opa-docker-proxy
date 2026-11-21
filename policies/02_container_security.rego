@@ -83,6 +83,16 @@ denial contains "unconfined security options are not allowed (enable with policy
 	not opt_in("unconfined_security")
 }
 
+# MaskedPaths/ReadonlyPaths override the default /proc and /sys protections
+# (what `--security-opt systempaths=unconfined` sets), so any explicit value
+# (including []) is treated as unconfined.
+denial contains "MaskedPaths/ReadonlyPaths overrides are not allowed (enable with policy.allow: unconfined_security)" if {
+	is_container_create
+	some key in {"MaskedPaths", "ReadonlyPaths"}
+	input.body.HostConfig[key] != null
+	not opt_in("unconfined_security")
+}
+
 unconfined_option(opt) if contains(lower(opt), "unconfined")
 
 unconfined_option(opt) if lower(opt) in {"label=disable", "label:disable"}

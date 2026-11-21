@@ -196,6 +196,9 @@ test_create_devices_and_unconfined if {
 	not allow with input as create({"SecurityOpt": ["seccomp=unconfined"]}) with data.config as create_cfg({})
 	not allow with input as create({"SecurityOpt": ["label=disable"]}) with data.config as create_cfg({})
 	allow with input as create({"SecurityOpt": ["no-new-privileges"]}) with data.config as create_cfg({})
+	not allow with input as create({"MaskedPaths": [], "ReadonlyPaths": []}) with data.config as create_cfg({})
+	not allow with input as create({"ReadonlyPaths": []}) with data.config as create_cfg({})
+	allow with input as create({"MaskedPaths": []}) with data.config as {"allow": ["containers_create", "unconfined_security"]}
 	allow with input as create({"Devices": [{"PathOnHost": "/dev/sda"}]}) with data.config as {"allow": ["containers_create", "devices"]}
 }
 
