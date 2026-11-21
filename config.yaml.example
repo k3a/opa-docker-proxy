@@ -73,7 +73,7 @@ policy:
   # Default: none, i.e. no bind mounts.
   allowed_bind_prefixes: []
   #  - /dev/
-  #  - /temp/agent/
+  #  - /tmp/agent/
 
   # Dangerous capabilities that may still be added with CapAdd
   # (e.g. NET_ADMIN). The dangerous list: ALL, BPF, DAC_READ_SEARCH,

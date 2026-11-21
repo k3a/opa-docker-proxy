@@ -269,14 +269,14 @@ test_mount_bind_denied_by_default if {
 }
 
 test_mount_bind_prefix_allowed_via_mounts if {
-	cfg := create_cfg({"allowed_bind_prefixes": ["/dev/", "/temp/agent/"]})
+	cfg := create_cfg({"allowed_bind_prefixes": ["/dev/", "/tmp/agent/"]})
 	allow with input as create({"Mounts": [{"Type": "bind", "Source": "/dev/sda", "Target": "/x"}]}) with data.config as cfg
-	allow with input as create({"Mounts": [{"Type": "bind", "Source": "/temp/agent/data", "Target": "/x"}]}) with data.config as cfg
+	allow with input as create({"Mounts": [{"Type": "bind", "Source": "/tmp/agent/data", "Target": "/x"}]}) with data.config as cfg
 }
 
 test_mount_bind_prefix_allowed_via_binds if {
-	cfg := create_cfg({"allowed_bind_prefixes": ["/dev/", "/temp/agent/"]})
-	allow with input as create({"Binds": ["/dev/sda:/x", "/temp/agent/data:/d:ro,Z"]}) with data.config as cfg
+	cfg := create_cfg({"allowed_bind_prefixes": ["/dev/", "/tmp/agent/"]})
+	allow with input as create({"Binds": ["/dev/sda:/x", "/tmp/agent/data:/d:ro,Z"]}) with data.config as cfg
 }
 
 test_mount_bind_one_bad_source_denies_all if {

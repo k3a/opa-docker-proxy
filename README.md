@@ -129,7 +129,7 @@ Loaded as `data.config`; see `config.yaml.example` for all options and the full 
 ```yaml
 policy:
   allow: [containers_create, containers_control, containers_delete]  # enable write groups / exempt hardening rules
-  allowed_bind_prefixes: ["/dev/", "/temp/agent/"]                   # bind mounts only below these (must start+end with "/")
+  allowed_bind_prefixes: ["/dev/", "/tmp/agent/"]                   # bind mounts only below these (must start+end with "/")
   allowed_capabilities: [NET_ADMIN]                                  # dangerous caps that may still be added
   allowed_images: ["alpine", "myregistry.local/*"]                   # images that may be pulled/run (default: any)
   allowed_client_cidrs: ["10.0.0.0/8"]                               # default: loopback + RFC1918
