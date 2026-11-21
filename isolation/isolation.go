@@ -30,6 +30,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -440,6 +441,14 @@ func (i *Isolation) checkReferences(ctx context.Context, client *http.Client, r 
 		refs = membershipReferences(data)
 
 	case r.Method == http.MethodPost && cleaned == "/commit":
+		// The daemon applies "changes" after the body labels, so a LABEL
+		// instruction there could overwrite the isolation label.
+		for _, ch := range r.URL.Query()["changes"] {
+			if strings.Contains(strings.ToLower(ch), "label") {
+				return errors.New("access denied: LABEL in commit changes is not permitted under isolation")
+			}
+		}
+
 		for _, c := range r.URL.Query()["container"] {
 			refs = append(refs, reference{typ: ResourceContainer, id: c})
 		}

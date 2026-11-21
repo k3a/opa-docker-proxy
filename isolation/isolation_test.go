@@ -270,6 +270,22 @@ func TestCommit(t *testing.T) {
 			t.Errorf("commit of foreign container allowed (%s)", mode)
 		}
 	}
+
+	// LABEL in changes could overwrite the isolation label
+	for _, q := range []string{
+		"changes=LABEL%20" + LabelKey + "%3Dci",
+		"changes=CMD%20x&changes=label%20a%3Db",
+	} {
+		for _, mode := range []Mode{ModeFull, ModeWrites} {
+			if err := check(t, mode, newReq("POST", "/commit?container=mine&repo=x&"+q, "")); err == nil {
+				t.Errorf("commit with %s allowed (%s)", q, mode)
+			}
+		}
+	}
+
+	if err := check(t, ModeFull, newReq("POST", "/commit?container=mine&changes=CMD%20%5B%22sh%22%5D", "")); err != nil {
+		t.Errorf("commit with benign changes: %v", err)
+	}
 }
 
 func TestImageDestinations(t *testing.T) {
