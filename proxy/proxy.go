@@ -337,6 +337,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ---- 6b. BuildKit gRPC under isolation ----
+	// Image names and labels of BuildKit builds are inside the gRPC calls, so
+	// the connection is bridged instead of copied.
+	if isUpgrade && p.Isolation != nil && isGRPCPath(utils.StripVersionPrefix(r.URL.Path)) {
+		p.serveGRPC(w, r, p.Isolation.BuildKit(p.dockerClient))
+
+		return
+	}
+
 	// ---- 7. Forward using ReverseProxy ----
 	// Go's httputil.ReverseProxy handles everything:
 	//   - Normal requests: forwards, copies response headers/body

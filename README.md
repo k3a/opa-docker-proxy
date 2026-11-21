@@ -165,6 +165,7 @@ In both modes:
 Limitations:
 - Without `policy.allowed_images`, pulled (shared) images are visible to every client of the daemon. Set it to mask them (in `full` mode; in `writes` mode reads are open by definition, but creating containers is still restricted).
 - Image builds can't be checked for `FROM` of a foreign image.
+- **BuildKit builds** (the default `docker build`) go over `/grpc`, so with isolation the proxy bridges that connection (`proxy/grpc.go`) and rewrites the Solve request (`isolation/buildkit.go`): the isolation label is injected, exported image names get the same shared/foreign check as `build -t`, and only the `dockerfile.v0` frontend, `moby`/`image` (no push) and client-side exporters are allowed. Raw LLB, entitlements, `source`/`cmdline` frontends, and the Prune/DiskUsage/build-history calls are denied. A `# syntax=` line can still name a custom frontend that ignores the label, so after each build the names it wrote are checked and removed if they are not labelled.
 - Starting the proxy with change-capable `policy.allow` tokens (`containers_control`, `containers_delete`, `exec`, `volumes_write`, `networks_write`, `images_write`) **without** isolation logs a warning: clients could then change objects they didn't create.
 
 To remove the feature: delete `isolation/`, the isolation handling in `main.go`, and the few calls in `proxy.go`.
