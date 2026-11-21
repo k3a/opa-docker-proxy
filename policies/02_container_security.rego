@@ -61,6 +61,21 @@ denial contains "host devices are not allowed (enable with policy.allow: devices
 	not opt_in("devices")
 }
 
+# DeviceCgroupRules such as "b *:* rwm" let the container mknod and use any
+# host device (MKNOD is in the default capability set). DeviceRequests asks
+# device drivers (e.g. GPUs) to inject host devices.
+denial contains "device cgroup rules are not allowed (enable with policy.allow: devices)" if {
+	is_container_create
+	count(input.body.HostConfig.DeviceCgroupRules) > 0
+	not opt_in("devices")
+}
+
+denial contains "device requests are not allowed (enable with policy.allow: devices)" if {
+	is_container_create
+	count(input.body.HostConfig.DeviceRequests) > 0
+	not opt_in("devices")
+}
+
 denial contains "unconfined security options are not allowed (enable with policy.allow: unconfined_security)" if {
 	is_container_create
 	some opt in input.body.HostConfig.SecurityOpt
@@ -71,6 +86,18 @@ denial contains "unconfined security options are not allowed (enable with policy
 unconfined_option(opt) if contains(lower(opt), "unconfined")
 
 unconfined_option(opt) if lower(opt) in {"label=disable", "label:disable"}
+
+# ---------------------------------------------------------------------------
+# Exec
+# ---------------------------------------------------------------------------
+
+# A privileged exec runs with all capabilities and no seccomp/AppArmor,
+# regardless of how the container was created.
+denial contains "privileged exec is not allowed (enable with policy.allow: privileged)" if {
+	regex.match(`^/containers/[^/]+/exec$`, input.path)
+	input.body.Privileged == true
+	not opt_in("privileged")
+}
 
 # ---------------------------------------------------------------------------
 # Capabilities
@@ -155,6 +182,16 @@ bind_source_allowed(src) if {
 	not has_dotdot(src)
 	some prefix in cfg.allowed_bind_prefixes
 	startswith(src, prefix)
+}
+
+# VolumesFrom inherits another container's mounts, including host bind mounts,
+# bypassing allowed_bind_prefixes. With full isolation the source must be a
+# container created through the proxy, whose mounts were already checked.
+denial contains "VolumesFrom is not allowed without full isolation (enable with policy.allow: volumes_from)" if {
+	is_container_create
+	count(input.body.HostConfig.VolumesFrom) > 0
+	isolation_mode != "full"
+	not opt_in("volumes_from")
 }
 
 # ---------------------------------------------------------------------------

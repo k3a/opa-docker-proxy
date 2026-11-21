@@ -55,6 +55,7 @@ allow_tokens := {
 	"host_ipc",
 	"host_userns",
 	"devices",
+	"volumes_from",
 	"unconfined_security",
 }
 

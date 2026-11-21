@@ -116,7 +116,7 @@ Denials can't be overridden by any permissive rule; they are relaxed only throug
 |------|--------|
 | `00_config.rego` | Config defaults (`default_config`), merge with `data.config`, validation (`config_errors`). |
 | `01_framework.rego` | `allow` / `reason`. Don't remove. The only place that defines `allow`. |
-| `02_container_security.rego` | Hardening for `/containers/create`: privileged, host network/PID/IPC/userns, host devices, unconfined seccomp/AppArmor/SELinux, dangerous `CapAdd` (case and `CAP_` prefix normalized), bind mounts outside allowed prefixes (`Binds` and `Mounts`), volume mounts with driver options (bind bypass), `/volumes/create` with `DriverOpts` or a non-`local` driver (bind-mount bypass via named volumes), unknown mount types, non-JSON body. |
+| `02_container_security.rego` | Hardening for `/containers/create`: privileged, host network/PID/IPC/userns, host devices (`Devices`, `DeviceCgroupRules`, `DeviceRequests`), privileged `exec`, `VolumesFrom` without full isolation, unconfined seccomp/AppArmor/SELinux, dangerous `CapAdd` (case and `CAP_` prefix normalized), bind mounts outside allowed prefixes (`Binds` and `Mounts`), volume mounts with driver options (bind bypass), `/volumes/create` with `DriverOpts` or a non-`local` driver (bind-mount bypass via named volumes), unknown mount types, non-JSON body. |
 | `03_operations.rego` | The operation allowlist: read-only default plus write groups. With full isolation only reads of isolatable objects are visible (no `/system/df`, `/swarm`, …). |
 | `04_images.rego` | `allowed_images`: limit which images may be pulled and run (empty = any). |
 | `06_internal_network.rego` | Deny clients outside `allowed_client_cidrs` (Unix-socket clients exempt). |

@@ -62,7 +62,7 @@ policy:
   #
   # Hardening exemptions for container creation:
   #   privileged, host_network, host_pid, host_ipc, host_userns,
-  #   devices, unconfined_security
+  #   devices, volumes_from (only needed without full isolation), unconfined_security
   allow: []
   #  - containers_create
   #  - containers_control

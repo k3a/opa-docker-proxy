@@ -48,21 +48,23 @@ var containerCreate = schema{
 	"Labels":  nil,
 	"Volumes": nil,
 	"HostConfig": {
-		"Privileged":   nil,
-		"NetworkMode":  nil,
-		"PidMode":      nil,
-		"IpcMode":      nil,
-		"UTSMode":      nil,
-		"UsernsMode":   nil,
-		"CgroupnsMode": nil,
-		"Devices":      nil,
-		"SecurityOpt":  nil,
-		"CapAdd":       nil,
-		"Binds":        nil,
-		"VolumesFrom":  nil,
-		"Links":        nil,
-		"VolumeDriver": nil,
-		"Tmpfs":        nil,
+		"Privileged":        nil,
+		"NetworkMode":       nil,
+		"PidMode":           nil,
+		"IpcMode":           nil,
+		"UTSMode":           nil,
+		"UsernsMode":        nil,
+		"CgroupnsMode":      nil,
+		"Devices":           nil,
+		"DeviceCgroupRules": nil,
+		"DeviceRequests":    nil,
+		"SecurityOpt":       nil,
+		"CapAdd":            nil,
+		"Binds":             nil,
+		"VolumesFrom":       nil,
+		"Links":             nil,
+		"VolumeDriver":      nil,
+		"Tmpfs":             nil,
 		"Mounts": {
 			"Type":   nil,
 			"Source": nil,
@@ -76,16 +78,19 @@ var containerCreate = schema{
 	"NetworkingConfig": {"EndpointsConfig": nil},
 }
 
+var execCreate = schema{"Privileged": nil, "User": nil}
+
 var volumeCreate = schema{"Driver": nil, "DriverOpts": nil}
 
 var networkMembership = schema{"Container": nil}
 
 var (
 	containerCreatePath   = regexp.MustCompile(`^/containers/create$`)
+	execCreatePath        = regexp.MustCompile(`^/containers/[^/]+/exec$`)
 	volumeCreatePath      = regexp.MustCompile(`^/volumes/create$`)
 	networkMembershipPath = regexp.MustCompile(`^/networks/[^/]+/(connect|disconnect)$`)
 	// Other POST endpoints whose JSON body is inspected or rewritten.
-	structuredPath = regexp.MustCompile(`^/(containers/create|commit|networks/create|volumes/create|networks/[^/]+/(connect|disconnect))$`)
+	structuredPath = regexp.MustCompile(`^/(containers/create|containers/[^/]+/exec|commit|networks/create|volumes/create|networks/[^/]+/(connect|disconnect))$`)
 )
 
 // IsJSON reports whether a Content-Type header denotes JSON, the way the
@@ -146,6 +151,8 @@ func Parse(method, path, contentType string, body []byte) (any, error) {
 		switch {
 		case containerCreatePath.MatchString(path):
 			s = containerCreate
+		case execCreatePath.MatchString(path):
+			s = execCreate
 		case volumeCreatePath.MatchString(path):
 			s = volumeCreate
 		case networkMembershipPath.MatchString(path):

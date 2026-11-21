@@ -199,6 +199,28 @@ test_create_devices_and_unconfined if {
 	allow with input as create({"Devices": [{"PathOnHost": "/dev/sda"}]}) with data.config as {"allow": ["containers_create", "devices"]}
 }
 
+test_create_device_cgroup_rules_and_requests if {
+	not allow with input as create({"DeviceCgroupRules": ["b *:* rwm"]}) with data.config as create_cfg({})
+	not allow with input as create({"DeviceRequests": [{"Driver": "nvidia"}]}) with data.config as create_cfg({})
+	allow with input as create({"DeviceCgroupRules": []}) with data.config as create_cfg({})
+	allow with input as create({"DeviceCgroupRules": ["c 1:3 rwm"]}) with data.config as {"allow": ["containers_create", "devices"]}
+}
+
+test_exec_privileged if {
+	exec := {"method": "POST", "path": "/containers/abc/exec", "client_ip": "@", "body": {"Privileged": true, "User": "root"}}
+	not allow with input as exec with data.config as {"allow": ["exec"]}
+	allow with input as exec with data.config as {"allow": ["exec", "privileged"]}
+	allow with input as object.union(exec, {"body": {"Privileged": false}}) with data.config as {"allow": ["exec"]}
+}
+
+test_create_volumes_from if {
+	not allow with input as create({"VolumesFrom": ["other"]}) with data.config as create_cfg({})
+	not allow with input as create({"VolumesFrom": ["other"]}) with data.config as create_cfg({}) with data.runtime.isolation.mode as "writes"
+	allow with input as create({"VolumesFrom": ["other"]}) with data.config as create_cfg({}) with data.runtime.isolation.mode as "full"
+	allow with input as create({"VolumesFrom": ["other"]}) with data.config as {"allow": ["containers_create", "volumes_from"]}
+	allow with input as create({"VolumesFrom": []}) with data.config as create_cfg({})
+}
+
 test_create_capabilities if {
 	not allow with input as create({"CapAdd": ["SYS_ADMIN"]}) with data.config as create_cfg({})
 	not allow with input as create({"CapAdd": ["ALL"]}) with data.config as create_cfg({})
