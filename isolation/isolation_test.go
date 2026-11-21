@@ -272,6 +272,43 @@ func TestCommit(t *testing.T) {
 	}
 }
 
+func TestImageDestinations(t *testing.T) {
+	deny := []string{
+		"POST /images/myimg/tag?repo=alpine&tag=3.19",
+		"POST /images/myimg/tag?repo=alpine:3.19",
+		"POST /images/myimg/tag?repo=alpine:old&tag=3.19",
+		"POST /images/myimg/tag?repo=otherimg",
+		"POST /commit?container=mine&repo=alpine&tag=3.19",
+		"POST /build?t=myapp&t=alpine:3.19",
+		"POST /v1.45/build?t=otherimg",
+		"POST /images/load",
+		"POST /images/create?fromSrc=-&repo=newimg",
+	}
+	for _, d := range deny {
+		m, p, _ := strings.Cut(d, " ")
+		for _, mode := range []Mode{ModeFull, ModeWrites} {
+			if err := check(t, mode, newReq(m, p, "")); err == nil {
+				t.Errorf("%s allowed (%s)", d, mode)
+			}
+		}
+	}
+
+	allow := []string{
+		"POST /images/myimg/tag?repo=myimg&tag=v2", // own image, new tag
+		"POST /images/myimg/tag?repo=brandnew&tag=v1",
+		"POST /commit?container=mine&repo=brandnew",
+		"POST /build?t=brandnew:1",
+		"POST /build",
+		"POST /images/create?fromImage=alpine&tag=3.19", // registry pull
+	}
+	for _, a := range allow {
+		m, p, _ := strings.Cut(a, " ")
+		if err := check(t, ModeFull, newReq(m, p, "")); err != nil {
+			t.Errorf("%s: %v", a, err)
+		}
+	}
+}
+
 func TestImagesGetNames(t *testing.T) {
 	if err := check(t, ModeFull, newReq("GET", "/images/get?names=myimg&names=alpine:3.19", "")); err != nil {
 		t.Errorf("own+shared export: %v", err)

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -70,6 +72,69 @@ func (i *Isolation) checkImage(ctx context.Context, client *http.Client, name st
 		return fmt.Errorf("access denied: image %q is not permitted (policy.allowed_images)", name)
 	case st == shared && write:
 		return fmt.Errorf("access denied: image %q is shared (not created through this proxy) and can not be changed", name)
+	}
+
+	return nil
+}
+
+// withTag combines the repo and tag parameters the way the daemon does: an
+// explicit tag replaces any tag or digest already in repo.
+func withTag(repo, tag string) string {
+	if tag == "" {
+		return repo
+	}
+
+	if n, _, found := strings.Cut(repo, "@"); found {
+		repo = n
+	}
+
+	if c := strings.LastIndex(repo, ":"); c > strings.LastIndex(repo, "/") {
+		repo = repo[:c]
+	}
+
+	return repo + ":" + tag
+}
+
+var imageTagPath = regexp.MustCompile(`^/images/.+/tag$`)
+
+// destinationRefs lists the image names a request writes to (tag, commit,
+// build) and reports whether the request creates an image that can not be
+// labelled and must be denied (load, import).
+func destinationRefs(r *http.Request, cleaned string) (refs []string, denied string) {
+	if r.Method != http.MethodPost {
+		return nil, ""
+	}
+
+	q := r.URL.Query()
+
+	switch {
+	case cleaned == "/images/load":
+		return nil, "loading images is not allowed with isolation (the image can not be labelled)"
+	case cleaned == "/images/create" && q.Has("fromSrc"):
+		return nil, "importing images is not allowed with isolation (the image can not be labelled)"
+	case cleaned == "/commit" || imageTagPath.MatchString(cleaned):
+		if repo := q.Get("repo"); repo != "" {
+			refs = append(refs, withTag(repo, q.Get("tag")))
+		}
+	case cleaned == "/build":
+		refs = append(refs, q["t"]...)
+	}
+
+	return refs, ""
+}
+
+// checkDestinations denies requests that would move a name onto a shared or
+// foreign image. Names that do not exist yet, and own images, are fine.
+func (i *Isolation) checkDestinations(ctx context.Context, client *http.Client, r *http.Request) error {
+	refs, denied := destinationRefs(r, utils.StripVersionPrefix(r.URL.Path))
+	if denied != "" {
+		return errors.New("access denied: " + denied)
+	}
+
+	for _, ref := range refs {
+		if err := i.checkImage(ctx, client, ref, true); err != nil {
+			return fmt.Errorf("image name %q can not be written: %w", ref, err)
+		}
 	}
 
 	return nil

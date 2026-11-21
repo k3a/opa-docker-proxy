@@ -358,6 +358,10 @@ func (i *Isolation) CheckAccess(ctx context.Context, dockerClient *http.Client, 
 		return err
 	}
 
+	if err := i.checkDestinations(ctx, dockerClient, r); err != nil {
+		return err
+	}
+
 	return i.checkReferences(ctx, dockerClient, r)
 }
 
