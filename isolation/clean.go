@@ -24,7 +24,7 @@ type CleanResult struct {
 // Objects are removed in dependency order (containers, networks, volumes,
 // images). Individual failures are collected in the result and do not stop
 // the run; an error is returned only when listing fails.
-func Clean(ctx context.Context, client *http.Client, name string, all bool, progress func(ResourceType, string)) (CleanResult, error) {
+func Clean(ctx context.Context, client *http.Client, name string, all, dryRun bool, progress func(typ ResourceType, id, isolation string)) (CleanResult, error) {
 	label := LabelKey
 	if !all {
 		label += "=" + name
@@ -41,29 +41,34 @@ func Clean(ctx context.Context, client *http.Client, name string, all bool, prog
 		typ    ResourceType
 		list   string
 		query  string
-		ids    func(body []byte) ([]string, error)
+		ids    func(body []byte) ([]object, error)
 		remove func(id string) string
 	}{
-		{ResourceContainer, "/containers/json", "all=1", func(b []byte) ([]string, error) {
+		{ResourceContainer, "/containers/json", "all=1", func(b []byte) ([]object, error) {
 			return idsOf(b, "Id")
 		}, func(id string) string { return "/containers/" + url.PathEscape(id) + "?force=1" }},
-		{ResourceNetwork, "/networks", "", func(b []byte) ([]string, error) {
+		{ResourceNetwork, "/networks", "", func(b []byte) ([]object, error) {
 			return idsOf(b, "Id")
 		}, func(id string) string { return "/networks/" + url.PathEscape(id) }},
-		{ResourceVolume, "/volumes", "", func(b []byte) ([]string, error) {
-			var v struct{ Volumes []struct{ Name string } }
+		{ResourceVolume, "/volumes", "", func(b []byte) ([]object, error) {
+			var v struct {
+				Volumes []struct {
+					Name   string
+					Labels map[string]string
+				}
+			}
 			if err := json.Unmarshal(b, &v); err != nil {
 				return nil, err
 			}
 
-			out := make([]string, 0, len(v.Volumes))
+			out := make([]object, 0, len(v.Volumes))
 			for _, vol := range v.Volumes {
-				out = append(out, vol.Name)
+				out = append(out, object{ID: vol.Name, Isolation: vol.Labels[LabelKey]})
 			}
 
 			return out, nil
 		}, func(id string) string { return "/volumes/" + url.PathEscape(id) + "?force=1" }},
-		{ResourceImage, "/images/json", "", func(b []byte) ([]string, error) {
+		{ResourceImage, "/images/json", "", func(b []byte) ([]object, error) {
 			return idsOf(b, "Id")
 		}, func(id string) string { return "/images/" + url.PathEscape(id) + "?force=1" }},
 	}
@@ -88,7 +93,19 @@ func Clean(ctx context.Context, client *http.Client, name string, all bool, prog
 			return res, fmt.Errorf("parse %v list: %w", s.typ, err)
 		}
 
-		for _, id := range ids {
+		for _, o := range ids {
+			id := o.ID
+
+			if dryRun {
+				res.Removed[s.typ]++
+
+				if progress != nil {
+					progress(s.typ, id, o.Isolation)
+				}
+
+				continue
+			}
+
 			body, status, err := dockerDo(ctx, client, http.MethodDelete, s.remove(id))
 
 			switch {
@@ -100,7 +117,7 @@ func Clean(ctx context.Context, client *http.Client, name string, all bool, prog
 				res.Removed[s.typ]++
 
 				if progress != nil {
-					progress(s.typ, id)
+					progress(s.typ, id, o.Isolation)
 				}
 			}
 		}
@@ -109,21 +126,35 @@ func Clean(ctx context.Context, client *http.Client, name string, all bool, prog
 	return res, nil
 }
 
-func idsOf(body []byte, key string) ([]string, error) {
+// object is a listed Docker object and the isolation label value it carries.
+type object struct {
+	ID        string
+	Isolation string
+}
+
+func idsOf(body []byte, key string) ([]object, error) {
 	var items []map[string]any
 	if err := json.Unmarshal(body, &items); err != nil {
 		return nil, err
 	}
 
-	ids := make([]string, 0, len(items))
+	objs := make([]object, 0, len(items))
 
 	for _, it := range items {
-		if id, ok := it[key].(string); ok && id != "" {
-			ids = append(ids, id)
+		id, ok := it[key].(string)
+		if !ok || id == "" {
+			continue
 		}
+
+		o := object{ID: id}
+		if labels, ok := it["Labels"].(map[string]any); ok {
+			o.Isolation, _ = labels[LabelKey].(string)
+		}
+
+		objs = append(objs, o)
 	}
 
-	return ids, nil
+	return objs, nil
 }
 
 func dockerDo(ctx context.Context, client *http.Client, method, path string) ([]byte, int, error) {

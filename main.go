@@ -37,7 +37,8 @@ type cliArgs struct {
 
 // cleanCmd removes isolated objects directly through the Docker socket.
 type cleanCmd struct {
-	All bool `arg:"--all-isolated" help:"remove objects of every isolation name (any directory), not just the current one"`
+	All    bool `arg:"--all-isolated" help:"remove objects of every isolation name (any directory), not just the current one"`
+	DryRun bool `arg:"--dry-run"      help:"print what would be removed without removing anything"`
 }
 
 func (cliArgs) Description() string {
@@ -54,7 +55,8 @@ Examples:
   opa-docker-proxy -i &                     run isolated for the current directory
   export DOCKER_HOST=unix://$(opa-docker-proxy --print-socket)
   opa-docker-proxy clean                    remove this directory's isolated objects
-  opa-docker-proxy clean --all-isolated     remove every isolated object`
+  opa-docker-proxy clean --all-isolated     remove every isolated object
+  opa-docker-proxy clean --dry-run          show what clean would remove`
 }
 
 func main() {
@@ -364,21 +366,29 @@ func runClean(cfg config.Config, args cliArgs) int {
 		},
 	}
 
+	verb, summary := "removed", "removed"
+	if args.Clean.DryRun {
+		verb, summary = "would remove", "would remove"
+		fmt.Println("dry run: nothing will be deleted")
+	}
+
 	if args.Clean.All {
 		fmt.Println("cleaning all isolated objects (any isolation name)")
 	} else {
 		fmt.Printf("cleaning objects of isolation %q\n", iso.Name)
 	}
 
-	res, err := isolation.Clean(context.Background(), client, iso.Name, args.Clean.All,
-		func(t isolation.ResourceType, id string) { fmt.Printf("removed %v %s\n", t, id) })
+	res, err := isolation.Clean(context.Background(), client, iso.Name, args.Clean.All, args.Clean.DryRun,
+		func(t isolation.ResourceType, id, isoName string) {
+			fmt.Printf("%s %v %s (isolation %q)\n", verb, t, id, isoName)
+		})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 
-	fmt.Printf("removed: %d containers, %d networks, %d volumes, %d images\n",
-		res.Removed[isolation.ResourceContainer], res.Removed[isolation.ResourceNetwork],
+	fmt.Printf("%s: %d containers, %d networks, %d volumes, %d images\n",
+		summary, res.Removed[isolation.ResourceContainer], res.Removed[isolation.ResourceNetwork],
 		res.Removed[isolation.ResourceVolume], res.Removed[isolation.ResourceImage])
 
 	for _, f := range res.Failures {
