@@ -57,6 +57,7 @@ allow_tokens := {
 	"devices",
 	"volumes_from",
 	"unconfined_security",
+	"network_customization",
 }
 
 # Runtime facts supplied by the proxy (not user-configurable):

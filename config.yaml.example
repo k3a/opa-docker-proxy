@@ -63,6 +63,7 @@ policy:
   # Hardening exemptions for container creation:
   #   privileged, host_network, host_pid, host_ipc, host_userns,
   #   devices, volumes_from (only needed without full isolation), unconfined_security
+  #   network_customization  custom bridge name/subnet/driver/options, static IPs, endpoint opts, MAC
   allow: []
   #  - containers_create
   #  - containers_control

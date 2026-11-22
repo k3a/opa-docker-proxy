@@ -244,3 +244,106 @@ denial contains "volume driver must be a string" if {
 	input.body.Driver
 	not is_string(input.body.Driver)
 }
+
+# ---------------------------------------------------------------------------
+# Network customization
+#
+# Networks may be created, but not tuned: no custom bridge name, subnet,
+# gateway, driver options or non-bridge drivers, and no static endpoint IPs,
+# endpoint driver options or MAC addresses.
+# (The Docker API cannot edit a network in place; changing one means
+# recreating it, which goes through these rules.)
+# Opt out with policy.allow: network_customization.
+# ---------------------------------------------------------------------------
+
+network_custom_allowed if opt_in("network_customization")
+
+denial contains "network creation requires a JSON object body (Content-Type: application/json)" if {
+	input.path == "/networks/create"
+	not is_object(object.get(input, "body", null))
+}
+
+denial contains "network drivers other than \"bridge\" are not allowed (enable with policy.allow: network_customization)" if {
+	input.path == "/networks/create"
+	not network_custom_allowed
+	not input.body.Driver in {"", "bridge"}
+}
+
+denial contains "network options (e.g. bridge name) are not allowed (enable with policy.allow: network_customization)" if {
+	input.path == "/networks/create"
+	not network_custom_allowed
+	count(input.body.Options) > 0
+}
+
+denial contains "custom network subnets/gateways (IPAM config) are not allowed (enable with policy.allow: network_customization)" if {
+	input.path == "/networks/create"
+	not network_custom_allowed
+	count(input.body.IPAM.Config) > 0
+}
+
+denial contains "custom IPAM options are not allowed (enable with policy.allow: network_customization)" if {
+	input.path == "/networks/create"
+	not network_custom_allowed
+	count(input.body.IPAM.Options) > 0
+}
+
+denial contains "custom IPAM drivers are not allowed (enable with policy.allow: network_customization)" if {
+	input.path == "/networks/create"
+	not network_custom_allowed
+	not input.body.IPAM.Driver in {"", "default"}
+}
+
+denial contains "network ConfigFrom/ConfigOnly is not allowed (enable with policy.allow: network_customization)" if {
+	input.path == "/networks/create"
+	not network_custom_allowed
+	some k in ["ConfigFrom", "ConfigOnly"]
+	input.body[k] # non-empty object or true
+	input.body[k] != {}
+}
+
+# Static endpoint addresses: containers/create (NetworkingConfig) and
+# network connect (EndpointConfig).
+denial contains "static container IP addresses are not allowed (enable with policy.allow: network_customization)" if {
+	not network_custom_allowed
+	some ep in endpoint_configs
+	ipam_set(ep.IPAMConfig)
+}
+
+denial contains "endpoint driver options are not allowed (enable with policy.allow: network_customization)" if {
+	not network_custom_allowed
+	some ep in endpoint_configs
+	count(ep.DriverOpts) > 0
+}
+
+# A fixed MAC can pin a DHCP/MAC-based address or spoof another host on
+# macvlan-style setups.
+denial contains "custom MAC addresses are not allowed (enable with policy.allow: network_customization)" if {
+	not network_custom_allowed
+	some ep in endpoint_configs
+	ep.MacAddress != ""
+}
+
+denial contains "custom MAC addresses are not allowed (enable with policy.allow: network_customization)" if {
+	not network_custom_allowed
+	is_container_create
+	input.body.MacAddress != ""
+}
+
+denial contains "custom MAC addresses are not allowed (enable with policy.allow: network_customization)" if {
+	not network_custom_allowed
+	is_container_create
+	input.body.Config.MacAddress != ""
+}
+
+endpoint_configs contains ep if {
+	input.path == "/containers/create"
+	some ep in input.body.NetworkingConfig.EndpointsConfig
+}
+
+endpoint_configs contains input.body.EndpointConfig if regex.match(`^/networks/[^/]+/connect$`, input.path)
+
+ipam_set(c) if c.IPv4Address != ""
+
+ipam_set(c) if c.IPv6Address != ""
+
+ipam_set(c) if count(c.LinkLocalIPs) > 0

@@ -146,8 +146,8 @@ test_group_images_volumes_networks if {
 	allow with input as req("POST", "/commit") with data.config as {"allow": ["images_write"]}
 	allow with input as req("DELETE", "/images/abc") with data.config as {"allow": ["images_write"]}
 	allow with input as req("POST", "/volumes/create") with data.config as {"allow": ["volumes_write"]}
-	allow with input as req("POST", "/networks/create") with data.config as {"allow": ["networks_write"]}
-	not allow with input as req("POST", "/networks/create") with data.config as {"allow": ["volumes_write"]}
+	allow with input as net_create({"Name": "n"}) with data.config as {"allow": ["networks_write"]}
+	not allow with input as net_create({"Name": "n"}) with data.config as {"allow": ["volumes_write"]}
 }
 
 test_group_secrets_configs_read if {
@@ -487,4 +487,69 @@ test_image_visible_restricted if {
 	not image_visible(["sha256:abc"]) with data.config as cfg
 	not image_visible(["evil:1"]) with data.config as cfg
 	not image_visible([]) with data.config as cfg
+}
+
+# ---------------------------------------------------------------------------
+# Network customization
+# ---------------------------------------------------------------------------
+
+net_create(body) := object.union(req("POST", "/networks/create"), {"body": body})
+
+net_cfg := {"allow": ["networks_write"]}
+
+test_network_create_plain_allowed if {
+	allow with input as net_create({"Name": "n"}) with data.config as net_cfg
+	# what compose sends for a plain network
+	allow with input as net_create({"Name": "n", "Driver": "bridge", "IPAM": {"Driver": "default", "Config": []}, "Options": {}, "Labels": {"a": "b"}, "Internal": true}) with data.config as net_cfg
+	allow with input as net_create({"Name": "n", "Driver": "", "IPAM": {"Driver": "", "Config": null}, "ConfigOnly": false}) with data.config as net_cfg
+}
+
+test_network_create_custom_denied if {
+	not allow with input as net_create({"Name": "n", "Options": {"com.docker.network.bridge.name": "br0"}}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "IPAM": {"Config": [{"Subnet": "10.9.0.0/24"}]}}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "IPAM": {"Options": {"a": "b"}}}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "IPAM": {"Driver": "evil"}}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "Driver": "macvlan"}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "Driver": "host"}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "ConfigFrom": {"Network": "cfg"}}) with data.config as net_cfg
+	not allow with input as net_create({"Name": "n", "ConfigOnly": true}) with data.config as net_cfg
+	not allow with input as req("POST", "/networks/create") with data.config as net_cfg
+}
+
+test_network_create_custom_opt_in if {
+	cfg := {"allow": ["networks_write", "network_customization"]}
+	allow with input as net_create({"Name": "n", "Driver": "macvlan", "Options": {"parent": "eth0"}, "IPAM": {"Config": [{"Subnet": "10.9.0.0/24"}]}}) with data.config as cfg
+}
+
+test_static_ip_denied if {
+	ccfg := create_cfg({})
+	body := {"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"n": {"IPAMConfig": {"IPv4Address": "10.9.0.5"}}}}}
+	not allow with input as object.union(create({}), {"body": body}) with data.config as ccfg
+	ok := {"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"n": {"Aliases": ["a"], "IPAMConfig": {"IPv4Address": ""}}}}}
+	allow with input as object.union(create({}), {"body": ok}) with data.config as ccfg
+	allow with input as object.union(create({}), {"body": body}) with data.config as create_cfg({"allow": ["containers_create", "network_customization"]})
+
+	conn := object.union(req("POST", "/networks/n/connect"), {"body": {"Container": "c", "EndpointConfig": {"IPAMConfig": {"IPv6Address": "fd00::5"}}}})
+	cc := {"allow": ["networks_write"]}
+	not allow with input as conn with data.config as cc
+	allow with input as object.union(req("POST", "/networks/n/connect"), {"body": {"Container": "c", "EndpointConfig": {"Aliases": ["x"]}}}) with data.config as cc
+	allow with input as conn with data.config as {"allow": ["networks_write", "network_customization"]}
+}
+
+ep(e) := object.union(create({}), {"body": {"Image": "alpine", "NetworkingConfig": {"EndpointsConfig": {"n": e}}}})
+
+conn(e) := object.union(req("POST", "/networks/n/connect"), {"body": {"Container": "c", "EndpointConfig": e}})
+
+test_endpoint_driver_opts_and_mac_denied if {
+	ccfg := create_cfg({})
+	not allow with input as ep({"DriverOpts": {"com.docker.network.endpoint.sysctls": "x"}}) with data.config as ccfg
+	not allow with input as ep({"MacAddress": "02:42:ac:11:00:02"}) with data.config as ccfg
+	allow with input as ep({"DriverOpts": {}, "MacAddress": ""}) with data.config as ccfg
+	not allow with input as object.union(create({}), {"body": {"Image": "alpine", "MacAddress": "02:42:ac:11:00:02"}}) with data.config as ccfg
+	allow with input as ep({"MacAddress": "02:42:ac:11:00:02"}) with data.config as create_cfg({"allow": ["containers_create", "network_customization"]})
+
+	cc := {"allow": ["networks_write"]}
+	not allow with input as conn({"DriverOpts": {"a": "b"}}) with data.config as cc
+	not allow with input as conn({"MacAddress": "02:42:ac:11:00:02"}) with data.config as cc
+	allow with input as conn({"MacAddress": ""}) with data.config as cc
 }
