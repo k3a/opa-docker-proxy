@@ -207,6 +207,24 @@ Limitations:
 
 To remove the feature: delete `isolation/`, the isolation handling in `main.go`, and the few calls in `proxy.go`.
 
+## Extras (`extras/`)
+
+Optional host-level hardening that is not part of the proxy. The proxy only controls what clients ask the Docker API to do; it cannot stop a container from *using* the network it is attached to. Even with `network_customization` denied, containers can still reach your LAN through Docker's NAT.
+
+`extras/docker-lan-block.sh` (+ `docker-lan-block.service`) closes that gap with iptables/ip6tables rules in the `DOCKER-USER` chain, so containers cannot open new connections to local networks:
+
+- Drops traffic from container interfaces (`IFACES`, default `docker0 br+`) to private/LAN ranges (`LAN_V4`/`LAN_V6`: RFC1918, CGNAT, link-local, ULA, documentation ranges). Replies to established connections are still allowed.
+- `AUTO_DETECT=1` (default) also blocks the host's on-link subnets found via `ip route`, skipping Docker's own bridges and veths so container-to-container traffic keeps working.
+- `ALLOW_V4`/`ALLOW_V6` punch exceptions as `ip[:proto:port]`, e.g. `192.168.1.53:udp:53` (IPv6 works too, e.g. `fd00::53:udp:53`).
+- DNS is allowed by default (`ALLOW_DNS=auto`): the nameservers from `/etc/resolv.conf` and systemd-resolved's `/run/systemd/resolve/resolv.conf` (loopback ignored) are exempted on tcp/udp 53, because Docker's embedded DNS queries the host resolver from inside the container, which would otherwise break whenever the resolver is a LAN address. Set `ALLOW_DNS="192.168.0.1 fd00::1"` for an explicit list or `ALLOW_DNS=""` to disable.
+- `BLOCK_HOST=1` (default) also drops new container-to-host connections (`INPUT`): containers cannot reach services on the host itself (bridge gateway IP, host LAN IP). The DNS and `ALLOW_*` exceptions with a protocol/port apply to the host as well, and IPv6 neighbour discovery is kept working. Set `BLOCK_HOST=0` if containers must reach host services (e.g. a local dev server). Published ports (`-p`) are unaffected: that traffic is forwarded to the container, not delivered to the host.
+- `docker-lan-block.sh clear` removes every rule the script added, identified by its `lan-block:` comment, and leaves other rules (Docker's own) untouched (the `br_netfilter` module and sysctls stay loaded). `systemctl stop docker-lan-block` does the same.
+- Idempotent (rules are only added if missing). Override any setting in `/etc/default/docker-lan-block`.
+- **Container-to-container:** containers on the default `docker0` bridge cannot reach each other (`ISOLATE_DEFAULT_BRIDGE=1`; this needs the `br_netfilter` kernel module with `net.bridge.bridge-nf-call-iptables=1`, otherwise same-bridge traffic never reaches iptables, so the script loads and enables it; `"icc": false` in `daemon.json` is the non-script equivalent), while containers on the same user-defined bridge (e.g. a Compose project's `_default` network) can. Traffic between container bridges is `RETURN`ed to Docker's own rules before the LAN drops, so Docker's address pools inside `172.16.0.0/12` don't break same-bridge traffic. Different user-defined bridges stay isolated by Docker itself.
+- `extras/test-docker-lan-block.sh [LAN_HOST]` is a smoke test (needs Docker, not root): it starts throwaway `lbtest-*` containers and networks and checks container-to-container isolation (default bridge blocked, same user-defined network allowed, different networks blocked), LAN blocking, internet and DNS, and container-to-host blocking via a temporary listener. Run it with `EXPECT_BLOCK_HOST=0` if you set `BLOCK_HOST=0`.
+
+Install: copy the script to `/usr/local/bin/docker-lan-block.sh`, the unit to `/etc/systemd/system/`, then `systemctl enable --now docker-lan-block`. The unit runs before `docker.service` and `systemctl stop` reverts the rules.
+
 ## Layout
 
 ```
@@ -218,5 +236,5 @@ isolation/       Optional label-based resource isolation
 logger/          slog setup + compact request log format
 utils/           API version-prefix splitting
 policies/        Default Rego policy set (+ tests)
-policies_extra/  Optional extra policies (not loaded by default)
+extras/          Optional host hardening: iptables LAN/host/container isolation script, systemd unit, smoke test
 ```

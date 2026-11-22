@@ -1,0 +1,14 @@
+[Unit]
+Description=Block Docker containers from reaching local LANs
+Before=docker.service
+Wants=network-pre.target
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/docker-lan-block.sh
+ExecStop=/usr/local/bin/docker-lan-block.sh clear
+
+[Install]
+WantedBy=multi-user.target
